@@ -1,0 +1,14 @@
+{
+  "agents": [
+    {
+      "id": "wealth-management-agent",
+      "location": "us-east4",
+      "kms_key": "projects/example-kms-prod/locations/us-east4/keyRings/analytics-kr/cryptoKeys/agent-key"
+    },
+    {
+      "id": "retail-insights-agent",
+      "location": "eu",
+      "kms_key": "projects/example-kms-shared/locations/eu/keyRings/analytics-kr/cryptoKeys/agent-key"
+    }
+  ]
+}

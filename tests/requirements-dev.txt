@@ -1,0 +1,3 @@
+# Unit-test dependencies. Not needed to run the framework, only to test it.
+# The runtime deps live in layer4/requirements.txt and layer5/scanner/requirements.txt.
+pytest>=8.0.0

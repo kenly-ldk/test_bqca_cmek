@@ -1,0 +1,36 @@
+# Regal configuration — https://openpolicyagent.org/projects/regal
+#
+# Everything Regal reports is fixed rather than silenced, with three documented
+# exceptions below. Each says why, because a linter config full of unexplained
+# disables is how policy quality quietly erodes.
+
+rules:
+  idiomatic:
+    directory-package-mismatch:
+      # Regal wants layer1/policy.rego to live at gda/cmek/policy.rego so the
+      # directory mirrors the package. This repo is organised by defence-in-depth
+      # layer (layer1..layer5) to match docs/design.md, and that mapping is more
+      # useful to a reader than the package path. Deliberate trade-off.
+      level: ignore
+
+  imports:
+    unresolved-reference:
+      # `data.config.approved_kms_projects` is supplied at evaluation time via
+      # `opa eval -d config/approved-kms-projects.json`, so it is genuinely
+      # unresolvable from the policy alone. The rule has no per-reference
+      # exclusion, and the fallback in the policy already handles absence by
+      # failing closed. Covered by tests instead:
+      # test_allow_when_all_agents_compliant (default set) and the
+      # "allowlist is data-driven" assertion in tests/run_layer1.sh.
+      level: ignore
+
+  style:
+    line-length:
+      # 120 rather than the default 80: the deny messages embed resource paths
+      # and sprintf format strings that read worse when wrapped.
+      max-line-length: 120
+
+capabilities:
+  from:
+    engine: opa
+    version: v1.0.0

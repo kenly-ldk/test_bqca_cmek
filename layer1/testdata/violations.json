@@ -1,0 +1,12 @@
+{
+  "agents": [
+    { "id": "no-key-agent", "location": "us-east4" },
+    { "id": "rogue-key-agent", "location": "us-east4",
+      "kms_key": "projects/attacker-kms-proj/locations/us-east4/keyRings/kr/cryptoKeys/k" },
+    { "id": "global-agent", "location": "global",
+      "kms_key": "projects/example-kms-prod/locations/global/keyRings/kr/cryptoKeys/k" },
+    { "id": "mismatched-key-agent", "location": "us-east4",
+      "kms_key": "projects/example-kms-prod/locations/eu/keyRings/kr/cryptoKeys/k" },
+    { "id": "malformed-key-agent", "location": "us-east4", "kms_key": "some-key-name" }
+  ]
+}

@@ -1,0 +1,12 @@
+config/shared.env.local
+.python-version
+__pycache__/
+*.pyc
+.out/
+layer1/config/approved-kms-projects.json
+layer1/manifests/agents.json
+layer1/manifests/agents-violating.json
+.regal-regression-check/
+
+# Internal engineering record — not for external distribution
+docs/internal/

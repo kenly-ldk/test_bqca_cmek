@@ -1,0 +1,8 @@
+{
+  "config": {
+    "approved_kms_projects": [
+      "example-kms-prod",
+      "example-kms-shared"
+    ]
+  }
+}

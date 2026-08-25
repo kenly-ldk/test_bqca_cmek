@@ -1,0 +1,228 @@
+# Layer 1 — the shift-left gate, as it would run in CI.
+#
+# Reference implementation. Adapt the auth step to your own setup; everything
+# else works as-is. The policy job needs no cloud credentials at all, which is
+# the point: a pull request is rejected before anything touches GCP.
+name: CMEK policy
+
+on:
+  pull_request:
+    # Covers everything the offline jobs actually test — not just layer1/**.
+    # A narrower list would let a PR touching the enforcer or the scanner skip
+    # CI entirely while their tests sit in this workflow.
+    paths:
+      - 'layer1/**'
+      - 'layer4/**'
+      - 'layer5/**'
+      - 'common/**'
+      - 'tests/**'
+      - '.regal/**'
+      - '.github/workflows/cmek-policy.yml'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write   # for Workload Identity Federation in the deploy job
+
+jobs:
+  # Offline Python tests. No cloud credentials, same as the policy job — these
+  # cover the compliance verdict, the enforcer's audit-log parsing and the
+  # scanner's reconciliation matrix, including the two "could not determine"
+  # branches a healthy live estate never reaches (validation-report F9).
+  unit:
+    name: Python unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install -r tests/requirements-dev.txt \
+                      -r layer4/requirements.txt \
+                      -r layer5/scanner/requirements.txt
+
+      - name: Run unit tests
+        run: bash tests/run_unit.sh -v
+
+  policy:
+    name: Validate agent manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Versions are pinned, not `latest`. The policy is Rego v1 (needs OPA
+      # >= 1.0) and .regal/ carries a custom rule written against Regal's 0.42
+      # rule API, so an upstream major bump can break this build for reasons
+      # that have nothing to do with the change under test. Keep in sync with
+      # tests/run_layer1.sh and the README.
+      - name: Install OPA
+        run: |
+          curl -sL -o /usr/local/bin/opa \
+            https://github.com/open-policy-agent/opa/releases/download/v${OPA_VERSION}/opa_linux_amd64_static
+          chmod +x /usr/local/bin/opa
+          opa version
+        env:
+          OPA_VERSION: 1.19.1
+
+      - name: Install Regal
+        run: |
+          curl -sL -o /usr/local/bin/regal \
+            https://github.com/StyraInc/regal/releases/download/v${REGAL_VERSION}/regal_Linux_x86_64
+          chmod +x /usr/local/bin/regal
+          regal version
+        env:
+          REGAL_VERSION: 0.42.0
+
+      # Fails the build if the policy itself is malformed. A policy that cannot
+      # load enforces nothing, and the failure is silent unless something checks —
+      # so this step is not optional.
+      - name: Policy compiles
+        run: opa check layer1/policy.rego
+
+      # Regal lints the policy. Config and the project's own custom rule are in
+      # .regal/ and are picked up automatically.
+      - name: Lint policy (Regal)
+        run: regal lint layer1/
+
+      - name: Custom Regal rule unit tests
+        run: regal test .regal/rules
+
+      # The custom rule exists to block one specific hazard: regex.find_n used
+      # for capture-group extraction, which silently returns the wrong string.
+      # Assert it still fires, or the guard has quietly stopped guarding.
+      - name: Regression guard is active
+        run: |
+          mkdir -p .regal-regression-check
+          cat > .regal-regression-check/legacy.rego <<'REGO'
+          package legacy.regression.check
+
+          import rego.v1
+
+          violation contains msg if {
+          	some resource in input.resource_changes
+          	project_match := regex.find_n(`projects/([^/]+)/`, resource.change.after.kms_key, 1)
+          	msg := project_match[0]
+          }
+          REGO
+          out="$(regal lint .regal-regression-check 2>&1 || true)"
+          rm -rf .regal-regression-check
+          if ! grep -q 'no-regex-find-n' <<<"$out"; then
+            echo "::error::Custom rule no-regex-find-n did NOT fire on the known-bad pattern."
+            exit 1
+          fi
+          echo "Regression guard active."
+
+      - name: Policy unit tests
+        run: opa test layer1/policy.rego layer1/policy_test.rego -v
+
+      # The concrete manifests and the allowlist data file carry real project
+      # IDs, so they are gitignored and DO NOT EXIST in a fresh checkout. They
+      # must be rendered from the committed *.example.json templates first —
+      # exactly as tests/run_layer1.sh does. Without this step every downstream
+      # opa eval fails with "no such file or directory", which silently turns
+      # the known-bad assertion below into a vacuous pass.
+      #
+      # With no config/shared.env.local present, render.sh falls back to the
+      # committed placeholders in config/shared.env, which are self-consistent:
+      # the rendered allowlist matches the rendered manifests.
+      - name: Render manifests from templates
+        run: |
+          bash layer1/render.sh
+          test -f layer1/manifests/agents.json
+          test -f layer1/manifests/agents-violating.json
+          test -f layer1/config/approved-kms-projects.json
+
+      # The allowlist lives in data, not in the policy, so the same policy file
+      # serves every environment. Point this at whichever config the target
+      # environment uses.
+      - name: Validate manifests
+        run: |
+          CONFIG=layer1/config/approved-kms-projects.json
+          [ -f "$CONFIG" ] || CONFIG=layer1/config/approved-kms-projects.example.json
+          echo "Using allowlist: $CONFIG"
+
+          status=0
+          for manifest in layer1/manifests/agents.json; do
+            echo "::group::$manifest"
+            if [ "$(opa eval -d layer1/policy.rego -d "$CONFIG" \
+                      -i "$manifest" 'data.gda.cmek.allow' --format=raw)" = "true" ]; then
+              echo "PASS"
+            else
+              echo "FAIL — denials:"
+              opa eval -d layer1/policy.rego -d "$CONFIG" \
+                -i "$manifest" 'data.gda.cmek.deny' --format=pretty
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $status
+
+      # Proves the gate actually rejects. A policy nobody has seen fail is a
+      # policy nobody knows works.
+      - name: Gate rejects a known-bad manifest
+        run: |
+          CONFIG=layer1/config/approved-kms-projects.json
+          [ -f "$CONFIG" ] || CONFIG=layer1/config/approved-kms-projects.example.json
+          MANIFEST=layer1/manifests/agents-violating.json
+
+          # Assert the fixture exists before asserting anything about it. A
+          # missing file makes `opa eval` fail, which makes the comparison below
+          # false, which reads as "correctly rejected" — a green check proving
+          # nothing, on a fresh checkout where the gate was never exercised.
+          if [ ! -f "$MANIFEST" ]; then
+            echo "::error::$MANIFEST is missing — render it before this step."
+            exit 1
+          fi
+
+          # Require an explicit false, not merely "not true", so an opa error
+          # can never be mistaken for a denial.
+          RESULT="$(opa eval -d layer1/policy.rego -d "$CONFIG" \
+                      -i "$MANIFEST" 'data.gda.cmek.allow' --format=raw)"
+          if [ "$RESULT" != "false" ]; then
+            echo "::error::Expected allow=false for the violating fixture, got '${RESULT}'."
+            exit 1
+          fi
+          echo "Known-bad manifest correctly rejected (allow=false)."
+
+  deploy:
+    name: Apply manifests
+    needs: [policy, unit]
+    # Skips cleanly when Workload Identity Federation is not configured, rather
+    # than failing the run at the auth step. The policy job above is the part
+    # that must pass everywhere; this one needs repository variables that only
+    # exist once you have wired the pipeline to a real project, so without them
+    # a red run would say nothing about the code and would mask a genuine
+    # failure. Set WIF_PROVIDER and DEPLOY_SERVICE_ACCOUNT to enable it.
+    if: >-
+      github.ref == 'refs/heads/main'
+      && github.event_name == 'push'
+      && vars.WIF_PROVIDER != ''
+      && vars.DEPLOY_SERVICE_ACCOUNT != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SERVICE_ACCOUNT }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install -r layer4/requirements.txt
+
+      # apply_manifest re-evaluates the same rules in-process before every
+      # create, so this step is safe even if the policy job is skipped or
+      # misconfigured. See layer1/apply_manifest.py.
+      - name: Apply
+        env:
+          PROJECT_ID: ${{ vars.PROJECT_ID }}
+          APPROVED_KMS_PROJECTS: ${{ vars.APPROVED_KMS_PROJECTS }}
+        run: python -m layer1.apply_manifest --manifest layer1/manifests/agents.json

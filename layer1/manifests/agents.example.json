@@ -1,0 +1,15 @@
+{
+  "agents": [
+    {
+      "id": "pipeline-wealth-agent",
+      "location": "${LOCATION}",
+      "kms_key": "projects/${PROJECT_ID}/locations/${LOCATION}/keyRings/${KMS_KEYRING}/cryptoKeys/${KMS_KEY}",
+      "display_name": "Wealth Management Analytics Agent",
+      "description": "Deployed via the Layer 1 policy-gated pipeline.",
+      "system_instruction": "You are the Cymbal Bank wealth analytics assistant. Answer questions about customers using the customers table. Be concise and prefer a single SQL query.",
+      "bigquery_tables": [
+        { "project_id": "${PROJECT_ID}", "dataset_id": "${BQ_SOURCE_DATASET}", "table_id": "${BQ_SOURCE_TABLE}" }
+      ]
+    }
+  ]
+}

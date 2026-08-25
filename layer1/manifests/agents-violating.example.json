@@ -1,0 +1,23 @@
+{
+  "agents": [
+    {
+      "id": "pipeline-nokey-agent",
+      "location": "${LOCATION}",
+      "display_name": "Missing CMEK — must be rejected",
+      "system_instruction": "This manifest must never reach the API.",
+      "bigquery_tables": [
+        { "project_id": "${PROJECT_ID}", "dataset_id": "${BQ_SOURCE_DATASET}", "table_id": "${BQ_SOURCE_TABLE}" }
+      ]
+    },
+    {
+      "id": "pipeline-rogue-agent",
+      "location": "${LOCATION}",
+      "kms_key": "projects/${ROGUE_PROJECT_ID}/locations/${LOCATION}/keyRings/${ROGUE_KMS_KEYRING}/cryptoKeys/${ROGUE_KMS_KEY}",
+      "display_name": "Unapproved KMS project — must be rejected",
+      "system_instruction": "This manifest must never reach the API.",
+      "bigquery_tables": [
+        { "project_id": "${PROJECT_ID}", "dataset_id": "${BQ_SOURCE_DATASET}", "table_id": "${BQ_SOURCE_TABLE}" }
+      ]
+    }
+  ]
+}
