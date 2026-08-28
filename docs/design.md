@@ -1014,7 +1014,7 @@ Everything below runs end-to-end in a throwaway project.
 | `layer1/apply_manifest.py` | Policy-gated deploy step (validate, then create) |
 | `layer1/manifests/`, `config/`, `testdata/` | Agent manifests, the KMS allowlist, fixtures |
 | `layer2/deploy.sh`, `probe.py` | Persona service accounts and the IAM behavioural probe |
-| `layer3/deploy.sh` | A datasource + a CMEK-protected agent, created through the Layer 1 gate |
+| `layer3/deploy.sh` | A datasource + a CMEK-protected agent, applied only after the Layer 1 policy passes |
 | `layer3/create_agent.py`, `verify_cmek.py` | CMEK fixtures and the key-revocation proof |
 | `layer4/` | Remediation function, log sink, deploy script |
 | `layer5/` | Compliance scanner, BigQuery DDL and view, deploy script |
@@ -1067,7 +1067,7 @@ bash scripts/00_bootstrap.sh                      # production preflight
 bash layer2/deploy.sh                             # early: IAM needs ~60-120s to propagate
 DRY_RUN=true bash layer4/deploy.sh                # shadow mode first
 bash layer5/deploy.sh
-bash layer3/deploy.sh                             # datasource + a CMEK agent via the gate
+bash layer3/deploy.sh                             # datasource + a CMEK agent, Layer 1 checked
 
 # 3. Add what the tests need, then test in dependency order.
 bash scripts/01_test_fixtures.sh                  # the unapproved key (tests only)

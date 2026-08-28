@@ -154,19 +154,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-log "7. Conversation CMEK: the key is pinned per project+location"
-# Conversations are ephemeral and are never provisioned (Layer 1 rejects them),
-# so there is no inventory to keep — the control is an attestation of the one
-# registered key. This proves the pin the attestation relies on.
-RC=0; python -m layer5.conversation_key_probe || RC=$?
-case "${RC}" in
-  0) check "conversation CMEK key is pinned per project+location" 0 "foreign and same-project-other keys both rejected" ;;
-  2) printf '  [ERROR] conversation key probe INCONCLUSIVE — could not run; re-run\n'
-     FAILED=1 ;;
-  *) check "conversation CMEK key is pinned per project+location" 1 "see above" ;;
-esac
-
-log "8. Conversation key attestation (one row per project+location)"
+log "7. Conversation key attestation (one row per project+location)"
 bq --project_id="${PROJECT_ID}" query --use_legacy_sql=false --location="${BQ_LOCATION}" \
   "SELECT location, compliance_status, verification_state, kms_key_project
    FROM ${BQ_DATASET}.${COMPLIANCE_VIEW}

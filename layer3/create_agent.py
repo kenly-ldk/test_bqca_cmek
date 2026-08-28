@@ -61,7 +61,10 @@ VARIANTS = {
     "compliant": ("agent-compliant", None, lambda env: env["APPROVED_KMS_KEY_PATH"]),
     "nokey": ("agent-nokey", None, lambda env: None),
     "rogue": ("agent-rogue-key", None, lambda env: env["ROGUE_KMS_KEY_PATH"]),
-    # `global` cannot be CMEK-encrypted at all, so a key is not even offered.
+    # `global` cannot be CMEK-encrypted by any route, so a key is not even
+    # offered: a regional key is rejected for location mismatch, and a global
+    # KMS key with "Global KMS keys are not allowed for Data Agent"
+    # (validation-report F6).
     "global-nokey": ("agent-global-nokey", "global", lambda env: None),
 }
 

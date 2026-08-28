@@ -40,40 +40,60 @@ compliance. See
 ## Quick start — Deploy the solution
 
 Stands up a **working demo**: the controls, plus a real CMEK-protected agent
-created through the policy gate. The validation suite in the next section then
-runs against this deployment rather than building its own. The full runbook is
+created only after the Layer 1 policy passes its manifest.
+[Reproduce the validation tests](#reproduce-the-validation-tests) then runs
+against this deployment rather than building its own. The full runbook is
 [§11 of design.md](docs/design.md#11-deployment--cutover-runbook); this is the
 short form.
 
-The deploy scripts need only `gcloud` and `bq`. The Python and OPA toolchain in
-the next section is for the policy gate and the tests, not for deployment.
+Deploying needs `gcloud`, `bq` and Python: `layer3/deploy.sh` evaluates the CMEK
+policy in-process, in Python, before it calls the API. OPA and Regal are only
+used by the Layer 1 policy's own tests, but the block below installs everything
+in one go.
 
-> **One term used throughout: the Layer 4 enforcer has two modes**, set by the
-> `DRY_RUN` environment variable on its Cloud Run service.
->
-> | Mode | `DRY_RUN` | Behaviour |
-> | :--- | :--- | :--- |
-> | **Enforcing** | `false` | Actually redacts and soft-deletes non-compliant agents |
-> | **Dry-run** | `true` | Logs what it *would* do, changes nothing |
->
-> `layer4/deploy.sh` deploys in **enforcing** mode unless you set
-> `DRY_RUN=true`. **On any estate you care about, deploy in dry-run first.** A
-> filter bug in this class of control deletes compliant production agents, and a
-> filter that matches both audit entries of a long-running operation (LRO) does
-> exactly that —
-> [F2](docs/validation-report.md#f2-createdataagent-emits-two-different-audit-log-shapes).
+**Install** — versions are pinned deliberately: the policy is Rego v1 (OPA ≥1.0)
+and `.regal/` carries a custom rule written against Regal's 0.42 rule API.
 
 ```bash
+# Layer 1 needs no install. Its CI half ships as a GitHub Actions workflow —
+# one implementation of the control, not the control itself. To watch it fire,
+# the code has to live in a repo you own: fork this one and clone your fork, or
+# repoint this clone afterwards:
+#   git remote set-url origin https://github.com/<you>/<your-repo>.git
+#   git push -u origin main
+# On any other CI you port the same two steps — see "Layer 1" under How it
+# works. Everything else here runs fine from a plain clone.
 git clone https://github.com/kenly-ldk/test_bqca_cmek.git
 cd test_bqca_cmek
 
-# Layer 1 needs no install, but its pull-request gate only runs from a repo you
-# own. Either fork this one in the GitHub UI and clone that instead, or repoint
-# this clone at your own remote:
-#   git remote set-url origin https://github.com/<you>/<your-repo>.git
-#   git push -u origin main
-# Everything below works from a plain clone — you just lose the automatic gate.
+# An isolated interpreter, so these client libraries cannot collide with
+# anything else on the machine. 3.12 matches the Cloud Function runtime that
+# Layer 4 deploys to, so local behaviour and deployed behaviour agree.
+pyenv virtualenv 3.12.7 gda-cmek-val && pyenv local gda-cmek-val
 
+# The Google client libraries the local scripts and tests import:
+#   layer4/           geminidataanalytics + functions-framework (the enforcer)
+#   layer5/scanner/   asset, bigquery      (the compliance scanner)
+#   tests/            pytest
+# Cloud Build installs the first two again at deploy time; this copy is what
+# lets you run layer3/deploy.sh, the probes and the unit tests from your shell.
+pip install -r layer4/requirements.txt \
+            -r layer5/scanner/requirements.txt \
+            -r tests/requirements-dev.txt
+
+# OPA evaluates the Rego policy; Regal lints it and runs the custom rule that
+# blocks the regex.find_n trap. Layer 1 is the only layer that needs them, and
+# ~/.local/bin keeps the install off the system path — no root required.
+mkdir -p ~/.local/bin
+curl -sL -o ~/.local/bin/opa   https://github.com/open-policy-agent/opa/releases/download/v1.19.1/opa_linux_amd64_static
+curl -sL -o ~/.local/bin/regal https://github.com/StyraInc/regal/releases/download/v0.42.0/regal_Linux_x86_64
+chmod +x ~/.local/bin/opa ~/.local/bin/regal
+```
+
+**Deploy.** Configure the estate, then bring the layers up in dependency order.
+Each step says which layer it is standing up:
+
+```bash
 cp config/shared.env config/shared.env.local   # then edit it; see below
 
 # 1. Preflight — APIs, both Google-managed service agents, the KMS key, and
@@ -84,15 +104,16 @@ bash scripts/00_bootstrap.sh
 #    ~60-120 s to propagate, which then overlaps with everything below.
 bash layer2/deploy.sh
 
-# 3. Layer 4 — detection and remediation. Dry-run first, so nothing is deleted
-#    while you are still confirming the enforcer classifies correctly.
+# 3. Layer 4 — detection and remediation. Always dry-run first: a filter bug in
+#    this class of control deletes compliant production agents.
 DRY_RUN=true bash layer4/deploy.sh
 
 # 4. Layer 5 — continuous compliance reporting.
 bash layer5/deploy.sh
 
-# 5. Layer 3 — a BigQuery datasource, then a CMEK-protected agent created
-#    through the Layer 1 policy gate exactly as a pipeline would.
+# 5. Layer 3 — a BigQuery datasource, then a CMEK-protected agent. The Layer 1
+#    policy checks the manifest first and the API is called only if it passes,
+#    which is exactly what a deployment pipeline would do.
 bash layer3/deploy.sh
 
 # 6. Layer 4 is watching by now. Confirm from its logs that the new agent was
@@ -101,11 +122,6 @@ bash layer3/deploy.sh
   gcloud run services update "${FUNCTION_NAME}" --project="${PROJECT_ID}" \
     --region="${LOCATION}" --update-env-vars=DRY_RUN=false )
 ```
-
-The agent goes in *before* the enforcer is switched on, on purpose: Layer 4 is
-already running in shadow mode when the agent is created, so you get to watch a
-real create event flow through it and be judged COMPLIANT before it has the
-power to delete anything.
 
 **What you have to change.** `config/shared.env` ships working defaults for
 everything except your own identity, and `config/shared.env.local` (gitignored)
@@ -119,15 +135,35 @@ overrides only what you set in it:
 | `ROGUE_PROJECT_ID` | validation only | A second disposable project. Leave the placeholder unless you are running the test suite |
 
 Everything else — `LOCATION`, `KMS_KEYRING`/`KMS_KEY`, `BQ_DATASET`,
-`SCAN_LOCATIONS`, the Pub/Sub topic and function names — already works as
-shipped. Override those in `shared.env.local` only if you need to.
+`SCAN_LOCATIONS`, the Pub/Sub topic and function names — comes with a default in
+`config/shared.env`. Override any of them in `shared.env.local` if the defaults
+do not suit your estate.
 
-**Layer 1 runs in two places**, which is why it has no deploy command. Locally,
-`layer3/deploy.sh` calls `layer1/render.sh` and then `layer1/apply_manifest.py`,
-which evaluates the CMEK policy and refuses to call the API at all if the
-manifest violates it. In CI, `.github/workflows/cmek-policy.yml` runs the same
-policy on every pull request — its `policy` and `unit` jobs need no
-configuration, so a fork goes green on the first push.
+## How it works
+
+The commands above stand up all five layers. Taken in layer order rather than
+run order, this is what each one does.
+
+### Layer 1 — the policy gate
+
+Layer 1 has no deploy step because it is code, not infrastructure. It runs in
+two places:
+
+* **Locally**, inside `layer3/deploy.sh`, which calls `layer1/render.sh` and
+  then `layer1/apply_manifest.py`. The policy is evaluated in-process and the
+  API is never called at all if the manifest violates it.
+* **In CI**, where `.github/workflows/cmek-policy.yml` runs the same policy on
+  every pull request. Its `policy` and `unit` jobs need no configuration, so a
+  fork goes green on the first push.
+
+**The control is the rule, not the runner.** The goal is that no manifest
+violating the CMEK policy ever reaches the API; GitHub Actions is only how this
+repo demonstrates it. Two portable pieces carry it to any other system:
+`opa eval` against `layer1/policy.rego` for the pre-merge check, and
+`python -m layer1.apply_manifest` for the apply step. The second re-evaluates
+the same rules in-process, so the gate still holds if the CI check is skipped or
+misconfigured — wire those into GitLab CI, Cloud Build, Jenkins or a pre-commit
+hook and Layer 1 is intact.
 
 That workflow also has an optional `deploy` job which applies manifests on push
 to `main`. Enable it with four GitHub repository variables — `WIF_PROVIDER`,
@@ -135,31 +171,34 @@ to `main`. Enable it with four GitHub repository variables — `WIF_PROVIDER`,
 it skips cleanly rather than failing, so the workflow is useful with or without
 a GCP connection.
 
-**One caveat on the personas:** `layer2/deploy.sh` creates five throwaway
-service accounts (`layer2-analyst`, `layer2-no-access`, …) for the behavioural
-matrix to impersonate. That is right for a demo estate and wrong for a
-production one — see
+### Layer 2 — the personas
+
+`layer2/deploy.sh` creates five service accounts and a `gdaConversationUser`
+custom role, which exists because no predefined role can create a conversation
+at least privilege. The behavioural probe then impersonates each persona in turn
+and records what it actually can and cannot do.
+
+Those five are *throwaway* identities (`layer2-analyst`, `layer2-no-access`, …)
+built for the probe. Right for a demo estate, wrong for a production one — see
 [Adapting this to your own estate](#adapting-this-to-your-own-estate).
 
-The two service agents `00_bootstrap.sh` creates are **Google-managed** —
+### Layer 3 — how the agent gets its key
+
+`00_bootstrap.sh` creates the key and grants it to the two service agents that
+need it. Those are **Google-managed** —
 `service-<PROJECT_NUMBER>@gcp-sa-geminidataanalytics.iam.gserviceaccount.com`
 and `...@gcp-sa-cloudaicompanion.iam.gserviceaccount.com`. They are derived from
 your `PROJECT_NUMBER`, so nothing is hardcoded to any one project, but you
 cannot substitute a service account of your own: CMEK requires the grant on
 those exact identities.
 
-### Layer 3 — how the agent gets its key
-
-`layer3/deploy.sh` is Layer 3 in practice. `00_bootstrap.sh` creates the
-key (`KMS_KEYRING` / `KMS_KEY` in `config/shared.env`) and grants both service
-agents on it; this script then creates an agent that uses it. Between those two,
-Layer 3 is simply a rule about how agents get created: every agent carries a
-`kms_key` in an approved project, in a location that supports CMEK (`us-east4`,
-`us`, `eu` — never `global`).
-
-It renders `layer1/manifests/agents.json` from the committed template, runs it
-through the CMEK policy, and only then calls the API — so it exercises Layers 1
-and 3 together. In code, the part that matters:
+`layer3/deploy.sh` then creates an agent that uses the key. Between those two
+steps, Layer 3 is simply a rule about how agents get created: every agent
+carries a `kms_key` in an approved project, in a location that supports CMEK
+(`us-east4`, `us`, `eu` — never `global`). The script renders
+`layer1/manifests/agents.json` from the committed template, runs it through the
+CMEK policy, and only then calls the API — so it exercises Layers 1 and 3
+together. In code, the part that matters:
 
 ```python
 agent = geminidataanalytics.DataAgent(
@@ -173,7 +212,8 @@ agent.kms_key = (
     f"/keyRings/gda-kr/cryptoKeys/agent-key"
 )
 
-client.create_data_agent_sync(          # client must target the REGIONAL endpoint
+client.create_data_agent_sync(       # target this location's own endpoint,
+                                     # never the global one
     request=geminidataanalytics.CreateDataAgentRequest(
         parent=f"projects/{project}/locations/us-east4",
         data_agent_id="wealth-management-agent",
@@ -185,28 +225,66 @@ client.create_data_agent_sync(          # client must target the REGIONAL endpoi
 **The key can only be set at creation** — it cannot be added or changed
 afterwards, which is exactly what makes Layer 4's read-back check trustworthy.
 Endpoint selection is covered in
-[§4.1](docs/design.md#41-supported-locations-and-endpoints--mandatory);
-`layer1/apply_manifest.py` is the policy-gated caller `layer3/deploy.sh` uses.
+[§4.1](docs/design.md#41-supported-locations-and-endpoints--mandatory).
 
-Layers 1, 2 and 4 exist to make that rule hold; Layer 5 reports on whether it
-did.
+**CMEK is not an access control**, and assuming otherwise is the most common way
+to misread this. Encryption at rest is orthogonal to who may call the API: the
+two Google-managed service agents decrypt on your behalf, so a caller needs no
+KMS permission at all. The Layer 2 matrix proves it — the `analyst` persona
+holds `dataAgentViewer` and no KMS binding of any kind, and reads the
+CMEK-encrypted agent successfully.
 
-### Adapting this to your own estate
+What the key gives you instead is a **kill switch**: disable it and nobody can
+read that agent — not the analyst, not an admin, not the service itself — and
+`LIST` stops returning it at all. That is revocation, crypto-shredding, key
+custody and an audit trail on key use. It is not authorization. Layer 2 decides
+who may call the API; Layer 3 decides whether the data is readable at all, and
+you need both.
 
-This repo is built as a validation estate, so not all of it is meant to be
-reused as-is. What transfers directly, what needs adapting, and what must never
-run against a project you care about:
+### Layer 4 — detect and remediate
 
-| Component | Reuse as-is? | Notes |
+A log sink matches `CreateDataAgent` audit entries and publishes them to
+Pub/Sub, which triggers a Cloud Function. The function does **not** trust the
+audit payload: it re-reads the agent on its regional endpoint, because
+`kms_key` is immutable after creation and the server's value is therefore
+authoritative. If that read fails it fails closed rather than assuming
+compliance. A non-compliant agent has its content redacted — twice, since one
+pass only rotates it into the read-only `lastPublishedContext` — and is then
+soft-deleted. End to end, 13–30 s.
+
+It runs in one of two modes, set by the `DRY_RUN` environment variable on its
+Cloud Run service:
+
+| Mode | `DRY_RUN` | Behaviour |
 | :--- | :--- | :--- |
-| `layer1/policy.rego`, `layer1/apply_manifest.py` | **Yes** | `.github/workflows/cmek-policy.yml` is a runnable **GitHub Actions reference pipeline** — copy it and adapt the auth step. Point `layer1/config/approved-kms-projects.json` at your own KMS projects |
-| `scripts/00_bootstrap.sh` | **Yes** | Production preflight only: APIs, the two service agents, the approved KMS key, and the build roles Layers 4 and 5 need |
-| `layer3/deploy.sh` | **Sample** | The table and agent it creates are samples. Replace them with your own datasource and manifest; keep the `render.sh` → `apply_manifest.py` pattern |
-| `scripts/01_test_fixtures.sh` | **No** | Validation only — the deliberately unapproved "rogue" key and CAI export grants. Never run it against a project you care about |
-| `layer2/deploy.sh` | **No** | It creates five *test personas* for the behavioural probe. Apply the persona model from [§6.2](docs/design.md#62-persona-model) to your real principals instead. The one piece worth lifting is the `gdaConversationUser` custom role it defines |
-| `layer4/` | **Yes** | Log sink → Pub/Sub → remediation function. Nothing to change beyond `config/shared.env.local` |
-| `layer5/` | **Yes** | Set `SCAN_LOCATIONS` and `APPROVED_KMS_PROJECTS` for your estate |
-| `tests/run_layer*.sh` | **As acceptance tests** | They create and delete real agents, so point them at a non-production project |
+| **Enforcing** | `false` | Actually redacts and soft-deletes non-compliant agents |
+| **Dry-run** | `true` | Logs what it *would* do, changes nothing |
+
+`layer4/deploy.sh` deploys in **enforcing** mode unless you set `DRY_RUN=true`,
+which is why the quick start sets it explicitly. Dry-run first is not caution
+for its own sake: a filter that matches both audit entries of a long-running
+operation (LRO) reads the trailing one as "no key" and deletes a **compliant**
+agent —
+[F2](docs/validation-report.md#f2-createdataagent-emits-two-different-audit-log-shapes).
+Watch it classify your own agents correctly before giving it the power to act.
+
+This is why the agent goes in *before* the enforcer is switched on: Layer 4 is
+already running in shadow mode when the agent is created, so you get to watch a
+real create event flow through it and be judged COMPLIANT before it has the
+power to delete anything.
+
+### Layer 5 — continuous compliance
+
+An hourly Cloud Run job builds an inventory from two independent sources — Cloud
+Asset Inventory (with a metadata-only read mask, so it never copies agent
+content into BigQuery) and the live API — writes them to BigQuery, and
+classifies every row in the `v_agent_compliance` view. Two sources rather than
+one because a disabled key removes an agent from the live `LIST` with no error;
+anything the API cannot show is reported `NON_COMPLIANT_UNVERIFIABLE` rather
+than dropped or vouched for.
+
+> Layers 1, 2 and 4 exist to make Layer 3's rule hold. Layer 5 is how you know
+> whether it did.
 
 ## Reproduce the validation tests
 
@@ -217,23 +295,11 @@ proving Layer 4 removes those is the whole point of the exercise. Expect
 soft-deleted tombstones afterwards, so run this against a disposable estate.
 Verdicts are in [Test status](#test-status) below.
 
-**Install** — versions are pinned deliberately: the policy is Rego v1 (OPA ≥1.0)
-and `.regal/` carries a custom rule written against Regal's 0.42 rule API.
-
-```bash
-pyenv virtualenv 3.12.7 gda-cmek-val && pyenv local gda-cmek-val
-pip install -r layer4/requirements.txt \
-            -r layer5/scanner/requirements.txt \
-            -r tests/requirements-dev.txt
-
-mkdir -p ~/.local/bin                          # no root required
-curl -sL -o ~/.local/bin/opa   https://github.com/open-policy-agent/opa/releases/download/v1.19.1/opa_linux_amd64_static
-curl -sL -o ~/.local/bin/regal https://github.com/StyraInc/regal/releases/download/v0.42.0/regal_Linux_x86_64
-chmod +x ~/.local/bin/opa ~/.local/bin/regal
-```
-
-**Offline first.** No GCP project, no credentials. This is the Layer 1 test end
-to end, plus every Python unit test.
+**Offline first.** No GCP project, no credentials — the toolchain from
+[Deploy](#quick-start--deploy-the-solution) is all you need. This covers the
+Layer 1 policy and the in-process gate that enforces it, plus every Python unit
+test. The one thing it cannot cover is the CI wiring itself: only a real pull
+request proves the workflow fires.
 
 ```bash
 bash tests/run_unit.sh            # 93 unit tests
@@ -330,6 +396,23 @@ you can re-run yourself. Last full end-to-end run: **2026-08-25, all passing.**
 `common/gda_common.py` is deliberately the only place compliance is decided, so
 the real-time enforcer and the periodic report cannot disagree about the same
 resource. The deploy scripts copy it into each build context.
+
+## Adapting this to your own estate
+
+This repo is built as a validation estate, so not all of it is meant to be
+reused as-is. What transfers directly, what needs adapting, and what must never
+run against a project you care about:
+
+| Component | Reuse as-is? | Notes |
+| :--- | :--- | :--- |
+| `layer1/policy.rego`, `layer1/apply_manifest.py` | **Yes** | `.github/workflows/cmek-policy.yml` is a runnable **GitHub Actions reference pipeline** — copy it and adapt the auth step. Point `layer1/config/approved-kms-projects.json` at your own KMS projects |
+| `scripts/00_bootstrap.sh` | **Yes** | Production preflight only: APIs, the two service agents, the approved KMS key, and the build roles Layers 4 and 5 need |
+| `layer3/deploy.sh` | **Sample** | The table and agent it creates are samples. Replace them with your own datasource and manifest; keep the `render.sh` → `apply_manifest.py` pattern |
+| `scripts/01_test_fixtures.sh` | **No** | Validation only — the deliberately unapproved "rogue" key and CAI export grants. Never run it against a project you care about |
+| `layer2/deploy.sh` | **No** | It creates five *test personas* for the behavioural probe. Apply the persona model from [§6.2](docs/design.md#62-persona-model) to your real principals instead. The one piece worth lifting is the `gdaConversationUser` custom role it defines |
+| `layer4/` | **Yes** | Log sink → Pub/Sub → remediation function. Nothing to change beyond `config/shared.env.local` |
+| `layer5/` | **Yes** | Set `SCAN_LOCATIONS` and `APPROVED_KMS_PROJECTS` for your estate |
+| `tests/run_layer*.sh` | **As acceptance tests** | They create and delete real agents, so point them at a non-production project |
 
 ## Going deeper
 

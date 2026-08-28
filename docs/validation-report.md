@@ -39,8 +39,8 @@ the unit suite for the logic the layers share.
 | Workload project | purpose-created, disposable (`WORKLOAD_PROJECT` below) |
 | Unapproved-KMS project | purpose-created, holds only an out-of-allowlist key (`ROGUE_PROJECT`) |
 | Organization | Google Cloud sandbox org with common guardrail policies enforced |
-| Location | `us-east4`, plus `global` as a negative control |
-| Approved key | `projects/WORKLOAD_PROJECT/locations/us-east4/.../cryptoKeys/agent-key` |
+| Location | `us-east4` and `us`, plus `global` as a negative control |
+| Approved key | `projects/WORKLOAD_PROJECT/locations/us-east4/.../cryptoKeys/agent-key`, with a `us` counterpart |
 | Unapproved key | `projects/ROGUE_PROJECT/locations/us-east4/.../cryptoKeys/rogue-key` |
 
 Agent IDs in the evidence below carry a run-scoped numeric suffix, because soft
@@ -209,13 +209,42 @@ The scanner therefore requests a metadata-only read mask
 (`name,assetType,location,kmsKeys,createTime,updateTime,project`) and never
 persists `versionedResources`.
 
-### F6. Regional endpoints are mandatory; global cannot be CMEK-encrypted
+### F6. Per-location endpoints are mandatory; global cannot be CMEK-encrypted
 
-CMEK supports `us-east4`, `us` and `eu` only. The `global` location cannot be
-CMEK-encrypted at all, so agents there can never be compliant and must surface
-as violations rather than be excluded from the scan. Each location must be
-addressed through its own endpoint — the global endpoint returns a misleading
-`403` for regional paths, which is easy to misread as a permissions problem.
+CMEK supports `us-east4`, `us` and `eu` only — one region and two
+multi-regions, so "regional" is the wrong shorthand; the line that matters is
+global versus everything else. Agents **can** be created in `global`, they
+simply can never carry a key, so they must surface as violations rather than be
+excluded from the scan.
+
+Each location is addressed through its own endpoint (`global` →
+`geminidataanalytics.googleapis.com`, `us`/`eu` →
+`geminidataanalytics.<loc>.rep.googleapis.com`, a region →
+`geminidataanalytics-<region>.googleapis.com` — note the hyphen). Calling the
+global endpoint with a non-global resource path returns a misleading `403`,
+which is easy to misread as a permissions problem.
+
+**`global` is closed off in both directions**, probed directly rather than taken
+from the documentation:
+
+| Attempt | Result |
+| :--- | :--- |
+| `global` agent + a **regional** key | `InvalidArgument`: *"KMS key location must match agent location."* |
+| `global` agent + a **global** KMS key | `InvalidArgument`: *"Global KMS keys are not allowed for Data Agent."* |
+
+The first rejection alone would be ambiguous — it is the generic
+location-matching rule, not a statement about `global`. The second closes the
+remaining door explicitly. So an agent at `global` can never carry a key by any
+route, which is why Layer 1 denies the location outright and Layers 4 and 5
+treat every `global` agent as a violation on sight.
+
+**Scope of what was exercised:** every *compliant* CMEK agent in the original
+validation ran in `us-east4`, and `global` was exercised as a negative control on
+every Layer 4 run. `us` was measured subsequently — a key-bearing agent was
+created successfully in the multi-region — so `us-east4` and `us` are both
+measured. **`eu` is in the API's documented CMEK set and is swept by the Layer 5
+scanner, but no key-bearing agent was created there: treat it as documented
+rather than measured.**
 
 ### F7. The cloudaicompanion service must be enabled
 
@@ -305,6 +334,9 @@ scrubs its content, and soft-deletes it.
 The honest claim is **detection and neutralisation in ~13–30 seconds, with a
 redacted tombstone retained for 30 days**. Disclose both the exposure window and
 the residual retention to risk and compliance.
+
+**This covers DataAgents only.** The table above, and every number in it, is
+about agents. Do not let them be read as covering any other resource type.
 
 Two mitigations reduce the exposure rather than eliminate it, and both are
 recommended:

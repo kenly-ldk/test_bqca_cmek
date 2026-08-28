@@ -2,7 +2,8 @@
 # Layer 3 in practice: create a data agent encrypted with a CMEK key.
 #
 # Deploys a BigQuery datasource for the agent to reference, then creates the
-# agent itself through the Layer 1 policy gate — exactly as a pipeline would.
+# agent itself. The Layer 1 policy checks the manifest first and the API is
+# called only if it passes — exactly what a deployment pipeline would do.
 # The kms_key is set at creation and is immutable afterwards.
 #
 # Run after scripts/00_bootstrap.sh, and after Layers 4 and 5 are deployed so
@@ -39,7 +40,7 @@ bash "${REPO_ROOT}/layer1/render.sh"
 
 # The gate runs in-process here, before any API call. A manifest that violates
 # the CMEK policy exits non-zero and creates nothing.
-log "Deploying the agent through the Layer 1 policy gate"
+log "Checking the manifest against the Layer 1 policy, then creating the agent"
 python -m layer1.apply_manifest --manifest "${REPO_ROOT}/layer1/manifests/agents.json"
 
 log "CMEK-protected agent ready in ${PROJECT_ID}"
