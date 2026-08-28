@@ -37,6 +37,10 @@ Disclose the exposure window and the residual retention to risk and
 compliance. See
 [§8 Control Equivalence Matrix](docs/design.md#8-control-equivalence-matrix).
 
+**Scope: data agents.** The five layers govern `DataAgent` resources. Stateless
+chat creates no resource, so there is nothing for CMEK to hold — Layer 2 governs
+who may call it. Stateful conversations are out of scope for this repo for now.
+
 ## Quick start — Deploy the solution
 
 Stands up a **working demo**: the controls, plus a real CMEK-protected agent
@@ -301,6 +305,13 @@ Layer 1 policy and the in-process gate that enforces it, plus every Python unit
 test. The one thing it cannot cover is the CI wiring itself: only a real pull
 request proves the workflow fires.
 
+In this repo that wiring is **GitHub Actions**
+(`.github/workflows/cmek-policy.yml`), which is how the demo happens to run
+Layer 1 — not part of the control. The two portable pieces are `opa eval`
+against `layer1/policy.rego` and `python -m layer1.apply_manifest`; port those
+to GitLab CI, Cloud Build, Jenkins or a pre-commit hook and Layer 1 is intact.
+See [Layer 1](#layer-1--the-policy-gate).
+
 ```bash
 bash tests/run_unit.sh            # 93 unit tests
 bash tests/run_layer1.sh          # policy: compile, lint, unit tests, gate
@@ -416,7 +427,7 @@ run against a project you care about:
 
 ## Going deeper
 
-This README is the overview. The two documents below are the detail behind it.
+This README is the overview. The three documents below are the detail behind it.
 
 * **[docs/design.md](docs/design.md)** — the deep dive. Architecture, per-layer
   component detail, the IAM persona model, which org-policy constraints the API
@@ -426,45 +437,7 @@ This README is the overview. The two documents below are the detail behind it.
   What was measured, the ten platform behaviours any control of this class has
   to design around (`F1`–`F10`), and the residual risk to put in front of risk
   and compliance.
-
-## Eleven things that will cost you time
-
-* **Delete is a soft delete.** 30-day tombstone, content still readable via GET,
-  no purge or undelete. Agent IDs stay occupied, so tests use run-scoped IDs.
-* **Redaction needs two passes.** One pass moves the content into the read-only
-  `lastPublishedContext`.
-* **Regional endpoints are mandatory.** `global` cannot be CMEK-encrypted, and
-  the global endpoint returns a misleading `403` for regional paths.
-* **CAI `ExportAssets` returns DataAgents only intermittently** (1 of 7 exports
-  in testing); `SearchAllResources` returned them every time. Build the
-  inventory on the search API.
-* **A disabled key hides an agent from `LIST` with no error.**
-* **`dataAgentCreator` grants `create` and nothing else** — no `get`, `list` or
-  `update`. Pair it with `dataAgentViewer` or your pipeline cannot read back
-  what it deployed.
-* **Conversation CMEK is one key per project per location**, not per resource.
-  The API rejects any second key, even another key in the same project — so
-  there is nothing per-conversation to enforce, and conversations are never
-  provisioned from a manifest. Layer 1 rejects them; Layer 5 attests the key.
-* **Conversations are gated by `cloudaicompanion.topics.*`, not by any
-  `geminidataanalytics` permission.** None of the nine GDA roles can create one.
-  The minimum is a custom role with `topics.create` + `topics.get` +
-  **`operations.get`** (create is an LRO and the poll is authorized separately —
-  easy to miss). `layer2/deploy.sh` ships it as `gdaConversationUser`.
-* **You cannot grant conversation *delete* at least privilege.**
-  `cloudaicompanion.topics.delete` is `NOT_SUPPORTED` in custom roles; only
-  `topicAdmin` has it, and that drags in `setIamPolicy`. Let conversations
-  expire instead.
-* **Nothing can gate `ListConversations`** — there is no `topics.list`
-  permission at all, so a principal with no role can enumerate them.
-* **`cloudaicompanion` is shared across Gemini for Google Cloud**, not private
-  to GDA. Of 2,387 predefined roles, 16 can create a conversation — including
-  **`bigquery.studioUser`** and **`iam.dataScientist`**. In a data estate that
-  is most of your analysts. And `cloudaicompanion` **cannot be restricted to
-  GDA** — it is one service, so org policy and API enablement are all-or-nothing
-  across Code Assist, Cloud Assist and Agentspace. The only per-principal lever
-  is an IAM deny policy (org/folder-level `denyAdmin` required). Note
-  `restrictServiceUsage` is a blunt instrument here: the same service backs
-  Gemini Code Assist, so denying it org-wide disables that for everyone. Contain
-  the data — dedicated projects for agents and conversations — and let the CMEK
-  attestation be the backstop.
+* **[docs/gotchas.md](docs/gotchas.md)** — eleven things that will cost you
+  time. The practical surprises, in one line each: soft delete, two-pass
+  redaction, the endpoint rules, and the conversation permission model that
+  lives in a different service entirely.
