@@ -24,11 +24,15 @@ log "1. CAI coverage, freshness, and the content-leak hazard"
 # runs collide, and a transient failure would otherwise abort the ENTIRE Layer 5
 # gate with a bare exit 2 and no message. A gate that dies without saying why is
 # the same silent-failure pattern this framework exists to catch.
-EXPORT_OUT="$(gcloud asset export --project="${PROJECT_ID}" \
+if EXPORT_OUT="$(gcloud asset export --project="${PROJECT_ID}" \
   --asset-types="geminidataanalytics.googleapis.com/DataAgent,cloudkms.googleapis.com/CryptoKey" \
   --content-type=resource \
   --bigquery-table="projects/${PROJECT_ID}/datasets/${BQ_DATASET}/tables/cai_snapshot" \
-  --output-bigquery-force 2>&1)" && EXPORT_RC=0 || EXPORT_RC=$?
+  --output-bigquery-force 2>&1)"; then
+  EXPORT_RC=0
+else
+  EXPORT_RC=$?
+fi
 
 if [[ "${EXPORT_RC}" -ne 0 ]]; then
   echo "  [INFO] ExportAssets could not run (exit ${EXPORT_RC}): $(tail -1 <<<"${EXPORT_OUT}")"
