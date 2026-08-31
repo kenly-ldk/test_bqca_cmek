@@ -38,31 +38,29 @@ compliance. See
 [§8 Control Equivalence Matrix](docs/design.md#8-control-equivalence-matrix).
 
 **Scope: two resource types, both covered.** `DataAgent` and `Conversation`
-each carry customer content and each take a CMEK key, and all five layers now
-cover both. Stateless chat is the third thing the API offers and creates no
-resource at all, so there is nothing for CMEK to hold — Layer 2 governs who may
-call it and that is the whole of it.
+each carry customer content and each take a CMEK key, and all five layers cover
+both. Stateless chat is the third thing the API offers and creates no resource
+at all, so there is nothing for CMEK to hold — Layer 2 governs who may call it
+and that is the whole of it.
 
-The mechanics differ at every level between the two — different key locations,
-a different audit service, a different remediation story — so conversations get
-their own [deploy step](#part-2--conversations) and
+The mechanics differ between the two — different key locations, a different
+audit service, a different remediation story — so conversations get their own
+[deploy step](#part-2--conversations) and
 [validation suite](#validating-conversations--a-separate-suite) rather than
-being folded into the agent flow. The measured detail is in
-[F8](docs/validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location).
+being folded into the agent flow.
 
 ## Quick start — Deploy the solution
 
 Stands up a **working demo**: the controls, plus a real CMEK-protected agent
 created only after the Layer 1 policy passes its manifest.
 [Reproduce the validation tests](#reproduce-the-validation-tests) then runs
-against this deployment rather than building its own. The full runbook is
-[§11 of design.md](docs/design.md#11-deployment--cutover-runbook); this is the
-short form.
+against this deployment rather than building its own.
 
 Two parts, in order: **[Part 1 — GDA agents](#part-1--gda-agents)** stands up
-the five layers, and **[Part 2 — Conversations](#part-2--conversations)** covers
-the second resource type, whose key no layer provisions. The install block below
-serves both. Which KMS location each resource type needs is tabulated in
+the five layers, and **[Part 2 — Conversations](#part-2--conversations)** applies
+the same five to the second resource type. The install block below serves both,
+and `00_bootstrap.sh` in Part 1 provisions the keys for both. Which KMS location
+each resource type needs is tabulated in
 [Where the CMEK key goes](#where-the-cmek-key-goes).
 
 Deploying needs `gcloud`, `bq` and Python: `layer3/deploy.sh` evaluates the CMEK
@@ -163,8 +161,7 @@ do not suit your estate.
 ### Part 2 — Conversations
 
 **Separate script, same five layers.** Conversations are a second CMEK-bearing
-resource type, and each layer now covers them — with different mechanics,
-because the platform treats them differently at every level:
+resource type. Each layer covers them, through different mechanics:
 
 | Layer | Agents | Conversations |
 | :--- | :--- | :--- |
@@ -183,11 +180,10 @@ left is a conversation that uses one:
 bash layer3/deploy_conversation.sh   # policy-gated CMEK conversation per location
 ```
 
-**The gate runs before the API call, and that ordering is the point.** Offering
-a key to `CreateConversation` registers it permanently for the whole
-project + location — even if the create then fails — and nothing frees the slot.
-A wrong key cannot be corrected, so the check cannot be an after-the-fact
-assertion the way a `kms_key` read-back is for an agent.
+**The gate runs before the API call.** Offering a key to `CreateConversation`
+registers it permanently for the whole project + location, including when the
+create then fails, and no API frees the slot. A wrong key cannot be corrected
+afterwards, so the check runs first rather than as a read-back.
 
 **Your application creates the real conversations,** not a deploy step. Layer 1
 rejects any manifest that declares one, and the key must be supplied per call:
@@ -239,13 +235,12 @@ Layer 1 gates the key, Layer 2 restricts who may call `CreateConversation` at
 all, and your application sets `kms_key` on every call. Layer 5 reports what it
 could not see rather than vouching for it.
 
-**One prerequisite is easy to miss.** Conversations emit no
-`geminidataanalytics` audit log at all — the create appears only as a
-`cloudaicompanion` **Data Access** entry, which is off by default.
-`00_bootstrap.sh` enables it; without that, Layer 4's conversation half matches
-nothing. Note the scope: it enables Data Access logging for the whole
+**Audit prerequisite.** Conversations emit no `geminidataanalytics` audit log.
+The create appears only as a `cloudaicompanion` **Data Access** entry, which is
+off by default; `00_bootstrap.sh` enables it, and without it Layer 4's
+conversation half matches nothing. The setting covers the whole
 `cloudaicompanion` service, which also backs Gemini Code Assist and Cloud
-Assist, so budget for the volume.
+Assist, so the log volume includes theirs.
 
 ## How it works
 
