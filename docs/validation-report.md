@@ -23,13 +23,13 @@ and compliance function.
 
 | Layer | Verdict | What produces it |
 | :--- | :--- | :--- |
-| 1 — CI/CD policy-as-code | **PASS** 14/14 | `tests/run_layer1.sh`; Rego v1 policy, Regal-linted, 35 policy unit tests, gated deploy step |
+| 1 — CI/CD policy-as-code | **PASS** 14/14 | `tests/run_layer1.sh`; Rego v1 policy, Regal-linted, 46 policy unit tests, gated deploy step |
 | 2 — IAM least privilege | **PASS** 45/45 | `tests/run_layer2.sh`; 45-cell persona × operation matrix executed live under impersonation |
 | 3 — CMEK at rest | **PASS** 6/6 | `tests/run_layer3.sh`; proven by key revocation, not field inspection |
 | 4 — Real-time remediation | **PASS** 7/7 | `tests/run_layer4.sh`; 13–30 s detect → redact → soft-delete across six runs |
 | 5 — Continuous compliance | **PASS** | `tests/run_layer5.sh`; two reconciled sources, proven by a live key-revocation proof |
 
-Cutting across all five, **`tests/run_unit.sh` passes 96/96** offline, with no
+Cutting across all five, **`tests/run_unit.sh` passes 118/118** offline, with no
 GCP project: the shared compliance verdict, the enforcer's audit-log parsing and
 every quadrant of the scanner's reconciliation matrix. It is not a layer — it is
 the unit suite for the logic the layers share.
@@ -488,19 +488,39 @@ same-location rule for both.
 The remaining conversation behaviours are unchanged from the previous reading and
 were re-confirmed:
 
-* **The lifecycle is audited only as Data Access, under a different service.**
-  `CreateConversation`, `GetConversation`, `ListConversations` and
-  `DeleteConversation` emit nothing under `geminidataanalytics.googleapis.com`.
-  They appear as `cloudaicompanion.v1.TopicService.CreateTopic` / `GetTopic` /
+* **The lifecycle is audited only as Data Access, under a different service —
+  but that is enough for Layer 4.** `CreateConversation`, `GetConversation`,
+  `ListConversations` and `DeleteConversation` emit nothing under
+  `geminidataanalytics.googleapis.com`. They appear as
+  `cloudaicompanion.v1.TopicService.CreateTopic` / `GetTopic` /
   `FindReadableTopics` / `DeleteTopic` — in
   `cloudaudit.googleapis.com/data_access`, which is **off by default** and has
   to be enabled per service. Even then the entries carry `request: null`,
   `response: null` and `authorizationInfo: null`: no key, no agent, no content.
-  The `resourceName` is a *topic*, and it is recorded in `us-central1` for a
-  conversation created in `us`. **Layer 4 can never cover conversations**: its
-  sink filters `serviceName="geminidataanalytics"` and
-  `methodName=~"CreateDataAgent"`, and widening it would not help, because there
-  is no key in the payload to classify.
+
+  An earlier reading concluded from that payload that **Layer 4 could never
+  cover conversations**. That was wrong, and wrong by the same mistake twice:
+  it assumed the control needs the key to be *in* the event. Layer 4 has never
+  trusted the audit payload for agents either — it re-reads the resource,
+  because `kms_key` is immutable and the server's value is the only
+  authoritative one. Measured on 2026-08-31, every link the re-read needs is
+  present:
+
+  | Needed | Present? |
+  | :--- | :--- |
+  | A create event | **Yes** — `TopicService.CreateTopic`, in the same two-entry LRO pair as `CreateDataAgent` (F2) |
+  | Something that identifies the resource | **Yes** — the topic ID *is* the conversation ID, verified in `us` and `eu` |
+  | Its location | The **paired** region: a `us` conversation is audited in `us-central1`, an `eu` one in `europe-west1`. Invert the key mapping to recover it |
+  | The caller | **Yes** — `authenticationInfo.principalEmail` |
+  | The key | **No** — and it does not matter; `GetConversation` supplies it |
+
+  Two real constraints remain. The Data Access logs must be enabled, and they
+  cover the whole `cloudaicompanion` service — Code Assist and Cloud Assist
+  included — so the volume is not GDA's alone. And **remediation is not
+  symmetric with the agent path**: a conversation has no updatable content field
+  to redact and `DeleteConversation` is a hard delete, so the only available
+  action destroys a live session irreversibly. The enforcer therefore defaults
+  to alerting (`CONVERSATION_ACTION=alert`) and deletes only when told to.
 * **Delete is a hard delete** — the opposite of `DeleteDataAgent` (F1).
   Immediately after `DeleteConversation`: `GetConversation` returns `NotFound`,
   `ListMessages` returns `NotFound`, the conversation is absent from
@@ -621,13 +641,15 @@ the residual retention to risk and compliance.
 
 **This covers DataAgents only.** The table above, and every number in it, is
 about agents. Conversations — the questions, the generated SQL and the returned
-rows — sit outside those numbers. They *can* be CMEK-encrypted, but only with a key
-in the paired region and only when the caller opts in per conversation; the
-enforcer cannot see them, and Cloud Asset Inventory cannot enumerate them (F8).
-So the agent-side guarantee is "non-compliant for 13–30 s, then neutralised",
-while the conversation-side guarantee is "protected if it was created with a
-key, and reported hourly by Layer 5 if it was not" — there is no remediation
-path at all. Their one favourable property is that `DeleteConversation` is a
+rows — sit outside those numbers. They *can* be CMEK-encrypted, but only with a
+key in the paired region and only when the caller opts in per conversation, and
+Cloud Asset Inventory cannot enumerate them at all (F8). The enforcer does see
+them, once Data Access logging is enabled on `cloudaicompanion`, but what it can
+*do* differs: there is no content field to redact and delete is irreversible, so
+it alerts by default. The agent-side guarantee is "non-compliant for 13–30 s,
+then neutralised"; the conversation-side guarantee is "detected in seconds and
+reported, neutralised only if you have accepted that deleting a live session is
+the right response". Their one favourable property is that `DeleteConversation` is a
 **hard** delete, so unlike an agent there is no 30-day readable tombstone and no
 residual retention to disclose. Do not let the agent-side numbers be read as
 covering the conversation surface; state the two separately.
@@ -663,7 +685,7 @@ assumed.
 
 | Question | Answer |
 | :--- | :--- |
-| 1. Does `CreateConversation` emit an Admin Activity audit log? | **No.** Nothing under `geminidataanalytics`. The lifecycle appears as `cloudaicompanion` `TopicService.*` **Data Access** logs, off by default, with null request/response payloads. Layer 4 can never cover conversations. |
+| 1. Does `CreateConversation` emit an Admin Activity audit log? | **No.** Nothing under `geminidataanalytics`. The lifecycle appears as `cloudaicompanion` `TopicService.*` **Data Access** logs, off by default, with null request/response payloads. Layer 4 covers it anyway by re-reading the resource, as it already does for agents — the topic ID is the conversation ID. |
 | 2. Is `DeleteConversation` soft or hard? | **Hard.** `NotFound` immediately, absent from LIST, and the ID is instantly reusable. No tombstone, no purge window — the opposite of `DeleteDataAgent` (F1). |
 | 3. Does key revocation block message content? | **Yes, for a conversation that carries its own key** — blocked at t+5min in `us`, t+2min in `eu`, with the Firestore CMEK error. The *anchor agent's* key does not cover messages; the conversation's own key does. The 2026-08-27 "no" tested only the former, because no conversation could then be given a key. |
 | 4. Can the registered key be rotated? | **Version yes, key no.** A new primary key version is accepted. A different key is refused, and disabling every version of the registered key does not free the slot. |

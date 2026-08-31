@@ -34,6 +34,7 @@ from gda_common import (
     NO_CONVERSATIONS,
     UNAPPROVED_KEY_PROJECT,
     UNSUPPORTED_LOCATION,
+    check_conversation_key,
     evaluate_conversation_compliance,
     parse_conversation_name,
 )
@@ -199,3 +200,51 @@ def test_rows_carry_no_conversation_content(conv_rows):
         "agent_id", "configured_kms_key", "kms_key_project", "compliance_status",
         "reason", "visible_in_cai", "visible_in_api",
     }
+
+
+# --- Layer 3 pre-flight gate ------------------------------------------------
+#
+# check_conversation_key runs BEFORE CreateConversation, because that call is
+# not idempotent in the way it looks: the first key offered is registered
+# permanently for the whole project+location even if the create then fails, and
+# no API frees the slot. A wrong key cannot be corrected, so it must never reach
+# the API.
+
+CONV_APPROVED = frozenset({"approved-a"})
+
+
+def _key(kms_location, project="approved-a"):
+    return f"projects/{project}/locations/{kms_location}/keyRings/kr/cryptoKeys/k"
+
+
+def test_paired_region_key_passes_the_gate():
+    assert check_conversation_key("us", _key("us-central1"), CONV_APPROVED).is_compliant
+    assert check_conversation_key("eu", _key("europe-west1"), CONV_APPROVED).is_compliant
+
+
+def test_the_documented_key_location_is_blocked():
+    """A key in the conversation's own location is what the docs prescribe and
+    what the API rejects. The gate has to catch it first."""
+    verdict = check_conversation_key("us", _key("us"), CONV_APPROVED)
+    assert not verdict.is_compliant
+    assert "us-central1" in verdict.reason
+
+
+def test_the_agents_key_location_is_blocked():
+    """`europe` is right for an eu AGENT and wrong for an eu conversation."""
+    assert not check_conversation_key("eu", _key("europe"), CONV_APPROVED).is_compliant
+
+
+def test_unsupported_conversation_locations_are_blocked():
+    for location in ("us-east4", "global", "asia"):
+        assert not check_conversation_key(
+            location, _key("us-central1"), CONV_APPROVED
+        ).is_compliant
+
+
+def test_missing_and_unapproved_and_malformed_keys_are_blocked():
+    assert check_conversation_key("us", None, CONV_APPROVED).status == MISSING_CMEK
+    assert not check_conversation_key(
+        "us", _key("us-central1", project="rogue"), CONV_APPROVED
+    ).is_compliant
+    assert not check_conversation_key("us", "not-a-key", CONV_APPROVED).is_compliant

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 from _loader import load_enforcer
-from gda_common import resolve_agent_name
+from gda_common import resolve_agent_name, resolve_conversation_from_topic
 
 PROJECT, LOCATION, AGENT = "p", "us-east4", "agent-1"
 FULL_NAME = f"projects/{PROJECT}/locations/{LOCATION}/dataAgents/{AGENT}"
@@ -151,3 +151,106 @@ def test_dry_run_defaults_to_armed(monkeypatch):
     """Absent DRY_RUN means enforcing. Documented, and worth pinning."""
     monkeypatch.delenv("DRY_RUN", raising=False)
     assert load_enforcer().DRY_RUN is False
+
+
+# --- conversation audit shapes (F8) ---------------------------------------
+#
+# Conversations reach Layer 4 through a different service, a different log
+# stream and a different resource name from agents, and every translation below
+# is measured against the live API rather than inferred:
+#
+#   * the create is cloudaicompanion TopicService.CreateTopic, in Data Access
+#     logs (off by default) -- there is NO geminidataanalytics entry at all;
+#   * the resourceName names a *topic*, and the topic ID is the conversation ID;
+#   * the audit location is the multi-region's PAIRED region, so a conversation
+#     in `us` is logged in `us-central1` and must be mapped back;
+#   * request, response and authorizationInfo are all null, so the payload can
+#     never supply the key -- the enforcer re-reads the resource instead.
+
+
+def _topic_event(location, topic="conv-1", project=PROJECT):
+    return {
+        "serviceName": "cloudaicompanion.googleapis.com",
+        "methodName": "google.cloud.cloudaicompanion.v1.TopicService.CreateTopic",
+        "resourceName": f"projects/{project}/locations/{location}/topics/{topic}",
+        "request": None,
+        "response": None,
+        "authorizationInfo": None,
+    }
+
+
+def test_us_topic_maps_back_to_a_us_conversation():
+    """Audited in us-central1; the conversation lives in `us`."""
+    conversation = resolve_conversation_from_topic(_topic_event("us-central1"))
+    assert conversation.location == "us"
+    assert conversation.resource_name == f"projects/{PROJECT}/locations/us/conversations/conv-1"
+
+
+def test_eu_topic_maps_back_to_an_eu_conversation():
+    conversation = resolve_conversation_from_topic(_topic_event("europe-west1", "c2"))
+    assert conversation.location == "eu"
+    assert conversation.resource_name == f"projects/{PROJECT}/locations/eu/conversations/c2"
+
+
+def test_topic_id_is_the_conversation_id():
+    """The whole mapping rests on this; measured for us and eu."""
+    assert resolve_conversation_from_topic(
+        _topic_event("us-central1", "my-conversation-42")
+    ).conversation_id == "my-conversation-42"
+
+
+def test_parent_only_entry_does_not_resolve():
+    """CreateTopic emits the same two-entry LRO pair as CreateDataAgent (F2).
+
+    The parent-only half names no topic. Returning None is correct: the sink
+    filters it out, and treating it as a resource would invent a violation.
+    """
+    assert resolve_conversation_from_topic(
+        {"resourceName": f"projects/{PROJECT}/locations/us-central1"}
+    ) is None
+
+
+def test_topic_in_a_non_conversation_location_is_ignored():
+    """cloudaicompanion also backs Code Assist; those topics are not ours."""
+    assert resolve_conversation_from_topic(_topic_event("us-west2")) is None
+    assert resolve_conversation_from_topic(_topic_event("global")) is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"resourceName": ""},
+        {"resourceName": f"projects/{PROJECT}/locations/us-central1/topics/"},
+        # An agent, not a topic.
+        {"resourceName": FULL_NAME},
+    ],
+)
+def test_non_topic_payloads_return_none(payload):
+    assert resolve_conversation_from_topic(payload) is None
+
+
+def test_conversation_and_agent_resolvers_do_not_overlap():
+    """A topic event must never resolve as an agent, or vice versa."""
+    topic = _topic_event("us-central1")
+    assert resolve_agent_name(topic) is None
+    assert resolve_conversation_from_topic({"resourceName": FULL_NAME}) is None
+
+
+# --- the destructive-action guard -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [(None, False), ("", False), ("alert", False), ("ALERT", False),
+     ("delete", True), ("Delete", True), ("nonsense", False)],
+)
+def test_conversation_delete_is_opt_in(monkeypatch, raw, expected):
+    """DeleteConversation is a hard delete with no tombstone and no redact
+    step, so anything other than an explicit `delete` must leave the resource
+    alone."""
+    if raw is None:
+        monkeypatch.delenv("CONVERSATION_ACTION", raising=False)
+    else:
+        monkeypatch.setenv("CONVERSATION_ACTION", raw)
+    assert load_enforcer().CONVERSATION_DELETE_ENABLED is expected

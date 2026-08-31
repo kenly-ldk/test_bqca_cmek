@@ -1019,7 +1019,8 @@ instead of reverse-engineering the reasoning from the code.
 | **"Could not determine" is a distinct outcome** | Layer 4 fails closed; Layer 5 classifies API-invisible rows `NON_COMPLIANT_UNVERIFIABLE`; `reconcile_check` exits INCOMPLETE rather than guessing. A partial read must never collapse into a confident verdict |
 | **One shared compliance implementation** | `common/gda_common.py` is used by both the enforcer and the scanner, so the real-time and periodic controls cannot disagree about the same resource |
 | **Structured logs**, not Security Command Center findings | SCC custom findings require org-level activation; a structured log plus a log-based alert is portable to any project |
-| Layer 1 **rejects conversations** rather than provisioning them | A conversation's CMEK key is chosen per conversation at runtime, not by a pipeline, so a manifest would pin nothing while looking like it had — and offering a key is a permanent write a retrying pipeline must never be able to make. Layer 5 reports the posture instead ([F8](validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location)) |
+| Layer 1 **rejects conversation resources but gates their key** | A conversation is created per user session at runtime, so a manifest declaring one would pin nothing while looking like it had. The *key* those conversations must use is a deployment-time decision, and the policy checks it against the paired region — before `CreateConversation` is ever called, because the first key offered is registered permanently even on a failed call ([F8](validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location)) |
+| Layer 4 **alerts** on a non-compliant conversation rather than deleting it | The agent path redacts then soft-deletes, leaving a scrubbed 30-day tombstone. A conversation has no updatable content field and `DeleteConversation` is a hard delete, so the only available action destroys a live user session irreversibly. `CONVERSATION_ACTION=delete` opts in once that trade has been accepted |
 
 Three things hold regardless of which of the above you revisit: the CMEK
 mechanism itself is a real cryptographic boundary (§4.4), the layered
@@ -1052,10 +1053,11 @@ Everything below runs end-to-end in a throwaway project.
 | `layer4/` | Remediation function, log sink, deploy script |
 | `layer5/` | Compliance scanner, BigQuery DDL and view, deploy script |
 | `layer5/revocation_proof.py` | Live proof that the CAI cross-check catches API-invisible agents |
+| `layer3/create_conversation.py`, `layer3/deploy_conversation.sh` | Layer 3 for conversations: the paired-region key gate, then a CMEK conversation per location |
 | `layer5/conversation_cmek_probe.py` | Re-measures the conversation CMEK rules — paired-region key, opt-in CMEK, the `us-east4` outage ([F8](validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location)); exits non-zero on platform drift |
 | `common/gda_common.py` | Endpoint resolution and the single compliance verdict |
 | `tests/run_layer{1,2,3,4,5}.sh` | Per-layer gates |
-| `tests/unit/`, `tests/run_unit.sh` | Offline Python unit tests (96) — verdict, audit-log parsing, reconciliation matrix |
+| `tests/unit/`, `tests/run_unit.sh` | Offline Python unit tests (118) — verdict, audit-log parsing, reconciliation matrix |
 | `.github/workflows/cmek-policy.yml` | Reference CI pipeline: unit tests + Layer 1 policy gate |
 | `scripts/99_teardown.sh` | Deletes both projects (prompts for confirmation) |
 
@@ -1206,14 +1208,14 @@ and must not be run against a real project.
    `eu`, whose key must be in `europe` because Cloud KMS has no `eu`
    ([§4.1](#41-supported-locations-and-endpoints--mandatory)).
 4. Apply `gcp.resourceLocations` to block `global` natively.
-5. **The conversation surface, separately.**
-   `scripts/02_conversation_key.sh` creates the keys that surface needs, in the
-   multi-region's *paired* region (`us` → `us-central1`, `eu` →
-   `europe-west1`). These are additional key rings, not substitutes for the
-   agent keys, and conversations cannot be hosted in `us-east4` at all. Nothing
-   in Steps 2–4 depends on this, and nothing here depends on them — but skip it
-   only if the estate creates no conversations, because their messages are
-   customer content that no other step in this runbook covers
+5. **The conversation surface.** `00_bootstrap.sh` also creates the keys that
+   surface needs, in the multi-region's *paired* region (`us` → `us-central1`,
+   `eu` → `europe-west1`). These are additional key rings, not substitutes for
+   the agent keys, and conversations cannot be hosted in `us-east4` at all. It
+   further enables **Data Access audit logs on `cloudaicompanion`**, without
+   which Layer 4 sees no conversation event at all — note that this covers the
+   whole service, including Gemini Code Assist. Create a CMEK conversation with
+   `layer3/deploy_conversation.sh`
    ([F8](validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location)).
 
 ### Step 2 — Deploy guardrails

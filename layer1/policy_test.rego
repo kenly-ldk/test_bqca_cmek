@@ -207,6 +207,100 @@ test_no_malformed_for_valid_path if {
 	} with input as {"agents": [compliant_agent]}
 }
 
+# --- conversation keys: the surface a manifest CAN gate --------------------
+#
+# A conversation itself is never provisionable (above), but the KEY its
+# conversations must be created with is a deployment-time decision, and it is
+# the one worth gating hardest: the first key offered to CreateConversation is
+# registered permanently for the whole project+location, even if that call
+# fails. A wrong key here cannot be corrected afterwards.
+
+conv_key(loc, kms_loc) := sprintf(
+	"projects/example-kms-prod/locations/%v/keyRings/kr/cryptoKeys/k",
+	[kms_loc],
+) if {
+	loc != ""
+}
+
+test_conversation_paired_region_key_allowed if {
+	cmek.allow with input as {"conversation_keys": [
+		{"location": "us", "kms_key": conv_key("us", "us-central1")},
+		{"location": "eu", "kms_key": conv_key("eu", "europe-west1")},
+	]}
+}
+
+# The documented configuration -- key in the conversation's own location -- is
+# what the API rejects, so the gate must reject it first.
+test_conversation_same_location_key_is_denied if {
+	some msg in cmek.deny with input as {"conversation_keys": [
+		{"location": "us", "kms_key": conv_key("us", "us")},
+	]}
+	contains(msg, "Conversation Key Location Mismatch")
+}
+
+test_conversation_eu_documented_key_is_denied if {
+	some msg in cmek.deny with input as {"conversation_keys": [
+		{"location": "eu", "kms_key": conv_key("eu", "europe")},
+	]}
+	contains(msg, "Conversation Key Location Mismatch")
+}
+
+# The agent rule applied to a conversation is also wrong, in both directions.
+test_conversation_rejects_the_agent_key_location if {
+	some msg in cmek.deny with input as {"conversation_keys": [
+		{"location": "us", "kms_key": conv_key("us", "us-east4")},
+	]}
+	contains(msg, "Conversation Key Location Mismatch")
+}
+
+test_conversation_missing_key_is_denied if {
+	some msg in cmek.deny with input as {"conversation_keys": [{"location": "us"}]}
+	contains(msg, "Conversation Missing CMEK")
+}
+
+test_conversation_unapproved_project_is_denied if {
+	some msg in cmek.deny with input as {"conversation_keys": [{
+		"location": "us",
+		"kms_key": "projects/attacker-proj/locations/us-central1/keyRings/kr/cryptoKeys/k",
+	}]}
+	contains(msg, "Conversation Unauthorized KMS Project")
+}
+
+# us-east4 cannot create a conversation at all, so a key for it is unusable.
+test_conversation_in_us_east4_is_denied if {
+	some msg in cmek.deny with input as {"conversation_keys": [
+		{"location": "us-east4", "kms_key": conv_key("us-east4", "us-east4")},
+	]}
+	contains(msg, "Conversation Unsupported Location")
+}
+
+test_conversation_in_global_is_denied if {
+	some msg in cmek.deny with input as {"conversation_keys": [
+		{"location": "global", "kms_key": conv_key("global", "global")},
+	]}
+	contains(msg, "Conversation Unsupported Location")
+}
+
+test_conversation_malformed_key_is_denied if {
+	some msg in cmek.deny with input as {"conversation_keys": [
+		{"location": "us", "kms_key": "just-a-key-name"},
+	]}
+	contains(msg, "Conversation Malformed Key")
+}
+
+test_conversation_key_without_location_is_denied if {
+	some msg in cmek.deny with input as {"conversation_keys": [
+		{"kms_key": conv_key("us", "us-central1")},
+	]}
+	contains(msg, "Malformed Manifest")
+}
+
+# A manifest with no conversation_keys at all is fine: an estate may have no
+# conversation surface, and this rule set must not invent one.
+test_manifest_without_conversation_keys_still_allowed if {
+	cmek.allow with input as {"agents": [compliant_agent]}
+}
+
 # --- multiple violations on one agent ---------------------------------------
 
 test_all_applicable_rules_report if {

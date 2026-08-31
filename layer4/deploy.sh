@@ -40,10 +40,28 @@ gcloud pubsub topics create "${PUBSUB_TOPIC}" --project="${PROJECT_ID}" 2>/dev/n
 #
 # `NOT operation.last=true` keeps both shapes while dropping the LRO tail.
 # `NOT protoPayload.status.code>0` drops failed attempts (e.g. ALREADY_EXISTS).
-SINK_FILTER='protoPayload.serviceName="geminidataanalytics.googleapis.com"
+# Two resource types, two services, one sink.
+#
+# Agents: CreateDataAgent under geminidataanalytics, Admin Activity, always on.
+#   `operation.last` drops the trailing LRO entry, which reports no key and
+#   would otherwise read as a violation on a compliant agent (F2).
+#
+# Conversations: there is NO geminidataanalytics audit log for them at all. The
+#   create surfaces as cloudaicompanion TopicService.CreateTopic, in DATA ACCESS
+#   logs, which are OFF BY DEFAULT — scripts/00_bootstrap.sh enables them, and
+#   without that this half of the sink matches nothing. CreateTopic emits the
+#   same two-entry LRO pair as CreateDataAgent, so `/topics/` keeps only the
+#   entry that names the resource. The payload carries no key; the function
+#   re-reads the conversation, exactly as it does for an agent (F8).
+SINK_FILTER='(protoPayload.serviceName="geminidataanalytics.googleapis.com"
 AND protoPayload.methodName=~"CreateDataAgent"
 AND NOT operation.last=true
-AND NOT protoPayload.status.code>0'
+AND NOT protoPayload.status.code>0)
+OR
+(protoPayload.serviceName="cloudaicompanion.googleapis.com"
+AND protoPayload.methodName=~"TopicService.CreateTopic"
+AND protoPayload.resourceName=~"/topics/"
+AND NOT protoPayload.status.code>0)'
 
 log "Log sink ${LOG_SINK}"
 if gcloud logging sinks describe "${LOG_SINK}" --project="${PROJECT_ID}" >/dev/null 2>&1; then

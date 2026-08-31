@@ -23,8 +23,8 @@ that governance, in five layers.
 | 1 — CI/CD policy-as-code | Rejects a non-compliant agent manifest in the pipeline, before it reaches the API |
 | 2 — IAM least privilege | Limits who can create an agent at all, so there are fewer ways to bypass the pipeline |
 | 3 — CMEK at rest | Encrypts agent content under your key, so revoking the key makes it unreadable |
-| 4 — Real-time remediation | Catches an agent created outside the pipeline, redacts its content and soft-deletes it |
-| 5 — Continuous compliance | Reports the standing CMEK posture for audit, and flags what it could not verify |
+| 4 — Real-time remediation | Catches an agent created outside the pipeline, redacts its content and soft-deletes it; alerts on a non-compliant conversation |
+| 5 — Continuous compliance | Reports the standing CMEK posture of both resource types for audit, and flags what it could not verify |
 
 Layers 1 and 2 are preventive, 4 and 5 are detective, and 3 is the cryptographic
 boundary the other four exist to keep enforced.
@@ -37,19 +37,17 @@ Disclose the exposure window and the residual retention to risk and
 compliance. See
 [§8 Control Equivalence Matrix](docs/design.md#8-control-equivalence-matrix).
 
-**Scope: the five layers are built around `DataAgent` resources.** Stateless
-chat creates no resource, so there is nothing for CMEK to hold — Layer 2 governs
-who may call it. Stateful **conversations** are a second CMEK-bearing resource
-type, and three of the layers do reach them: Layer 1 rejects them from
-manifests, Layer 2 gates who may create one, and Layer 5 reports their posture.
-Layer 4 cannot see them at all.
+**Scope: two resource types, both covered.** `DataAgent` and `Conversation`
+each carry customer content and each take a CMEK key, and all five layers now
+cover both. Stateless chat is the third thing the API offers and creates no
+resource at all, so there is nothing for CMEK to hold — Layer 2 governs who may
+call it and that is the whole of it.
 
-What no layer does is provision a conversation's key, because that key is
-chosen per conversation at runtime and belongs in a different KMS location from
-the agents'. That is why conversations get their own
-[deploy step](#part-2--conversations) and
-[validation suite](#validating-conversations--a-separate-suite) rather than a
-layer. The measured detail is in
+The mechanics differ at every level between the two — different key locations,
+a different audit service, a different remediation story — so conversations get
+their own [deploy step](#part-2--conversations) and
+[validation suite](#validating-conversations--a-separate-suite) rather than
+being folded into the agent flow. The measured detail is in
 [F8](docs/validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location).
 
 ## Quick start — Deploy the solution
@@ -164,38 +162,34 @@ do not suit your estate.
 
 ### Part 2 — Conversations
 
-**Separate, not optional.** It is separate because no layer provisions this
-key, and the agent flow does not depend on any of it — you can deploy, validate
-and run all five layers without coming here. Three of them still reach
-conversations once those exist: Layer 1 rejects them from manifests, Layer 2
-gates who may create one, and Layer 5 reports their posture. Layer 4 cannot see
-them. It is not optional because a conversation holds the same customer content
-an agent does,
-in plainer form: the analyst's question, the generated SQL and the returned
-rows. Until this is done, all of it rests under Google-managed encryption, and
-no layer above changes that.
+**Separate script, same five layers.** Conversations are a second CMEK-bearing
+resource type, and each layer now covers them — with different mechanics,
+because the platform treats them differently at every level:
 
-It applies to any estate where a conversation can be created. Creation is gated
-by `cloudaicompanion.topics.create`, which 16 predefined roles carry, including
-`bigquery.studioUser` and `iam.dataScientist`, and no `geminidataanalytics`
-permission controls it ([§6.2](docs/design.md#62-persona-model)).
+| Layer | Agents | Conversations |
+| :--- | :--- | :--- |
+| 1 — policy gate | `agents[]` in the manifest | `conversation_keys[]`, checked against the **paired region**; also runs in-process before `CreateConversation` |
+| 2 — IAM | `dataAgent*` roles | `cloudaicompanion.topics.*`, via the `gdaConversationUser` custom role |
+| 3 — CMEK at rest | key + agent | same key ring name, **paired region**; the conversation is created by your app, not the pipeline |
+| 4 — detect | `CreateDataAgent`, Admin Activity | `TopicService.CreateTopic`, Data Access (**off by default**) |
+| 4 — remediate | redact ×2, soft delete | **alert only by default** — delete is hard and irreversible |
+| 5 — report | per agent | per location, over every conversation in it |
 
-There is exactly one deployable thing here — the key, in the paired region the
-conversation surface requires rather than the agents' locations
-([Where the CMEK key goes](#where-the-cmek-key-goes)):
+`00_bootstrap.sh` already created the paired-region keys in Part 1. What is
+left is a conversation that uses one:
 
 ```bash
-bash scripts/02_conversation_key.sh   # paired-region keys + service-agent grants
+bash layer3/deploy_conversation.sh   # policy-gated CMEK conversation per location
 ```
 
-**There is no conversation to deploy.** Conversations are ephemeral runtime
-resources, created per user session by your application and hard-deleted;
-Layer 1 rejects any manifest that declares one. So the pipeline provisions the
-key, and the application decides — per conversation, at runtime — whether to use
-it. That is the whole difference from the agent flow, where the key is
-immutable, set at creation by the pipeline, and therefore knowable in advance.
+**The gate runs before the API call, and that ordering is the point.** Offering
+a key to `CreateConversation` registers it permanently for the whole
+project + location — even if the create then fails — and nothing frees the slot.
+A wrong key cannot be corrected, so the check cannot be an after-the-fact
+assertion the way a `kms_key` read-back is for an agent.
 
-In your application, the part that matters:
+**Your application creates the real conversations,** not a deploy step. Layer 1
+rejects any manifest that declares one, and the key must be supplied per call:
 
 ```python
 client = geminidataanalytics.DataChatServiceClient(   # the `us` endpoint,
@@ -219,22 +213,31 @@ client.create_conversation(
 )
 ```
 
-**Omit `kms_key` and the conversation is simply unencrypted.** It does not
-inherit the key registered for the project and location — it stays readable
-while that key is disabled. CMEK on conversations is opt-in per conversation,
-which is why this is a detective control rather than a preventive one:
+Omit `kms_key` and the conversation is unencrypted. It does not inherit the key
+registered for the project and location, and stays readable while that key is
+disabled. That is why Layer 4 and Layer 5 both cover this surface rather than
+trusting the key's existence.
 
-| | Agents | Conversations |
-| :--- | :--- | :--- |
-| Layer 1 gates the manifest | yes | n/a — rejects them outright |
-| Layer 4 detects and remediates | yes, 13–30 s | **never** — the create emits no `geminidataanalytics` audit log |
-| Layer 5 reports the posture | yes | yes, hourly, per location |
+**Layer 4 defaults to alerting, not deleting.** For an agent, remediation
+redacts twice then soft-deletes, leaving a scrubbed tombstone. A conversation
+has neither half: no updatable content field, and `DeleteConversation` is a hard
+delete with no undelete. Remediating one destroys a live user session
+irreversibly, so the enforcer alerts and leaves it alone until you say
+otherwise:
 
-So an unkeyed conversation is *reported* and never remediated. Contain the rest
-with project segregation and an IAM deny policy on
-`cloudaicompanion.topics.create` — the permission model lives in a different
-service, and 16 predefined roles carry it
-([§6.2](docs/design.md#62-persona-model)).
+```bash
+( source scripts/prelude.sh
+  gcloud run services update "${FUNCTION_NAME}" --project="${PROJECT_ID}" \
+    --region="${LOCATION}" --update-env-vars=CONVERSATION_ACTION=delete )
+```
+
+**One prerequisite is easy to miss.** Conversations emit no
+`geminidataanalytics` audit log at all — the create appears only as a
+`cloudaicompanion` **Data Access** entry, which is off by default.
+`00_bootstrap.sh` enables it; without that, Layer 4's conversation half matches
+nothing. Note the scope: it enables Data Access logging for the whole
+`cloudaicompanion` service, which also backs Gemini Code Assist and Cloud
+Assist, so budget for the volume.
 
 ## How it works
 
@@ -412,7 +415,7 @@ to GitLab CI, Cloud Build, Jenkins or a pre-commit hook and Layer 1 is intact.
 See [Layer 1](#layer-1--the-policy-gate).
 
 ```bash
-bash tests/run_unit.sh            # 96 unit tests
+bash tests/run_unit.sh            # 118 unit tests
 bash tests/run_layer1.sh          # policy: compile, lint, unit tests, gate
 ```
 
@@ -529,8 +532,8 @@ you can re-run yourself.
 
 | Test | What it verifies | Result |
 | :--- | :--- | :--- |
-| `run_unit.sh` | The shared compliance verdict, audit-log parsing and reconciliation matrix — offline, no GCP project needed | 96/96 |
-| `run_layer1.sh` | Layer 1 — Regal-linted policy, 35 policy unit tests, policy-gated deploy step | 14/14 |
+| `run_unit.sh` | The shared compliance verdict, audit-log parsing for both resource types, and the reconciliation matrix — offline, no GCP project needed | 118/118 |
+| `run_layer1.sh` | Layer 1 — Regal-linted policy, 46 policy unit tests (agents and conversation keys), policy-gated deploy step | 14/14 |
 | `run_layer2.sh` | Layer 2 — 45-cell persona × operation matrix, live under impersonation, incl. conversations | 45/45 |
 | `run_layer3.sh` | Layer 3 — proven by revoking the key, not by inspecting a field | 6/6 |
 | `run_layer4.sh` | Layer 4 — ~13–30 s detect → redact → soft-delete, incl. a compliant agent that must survive | 7/7 |
@@ -634,7 +637,7 @@ Two API behaviours to know before submitting a conversation key:
 | `scripts/prelude.sh` | Bash counterpart of the Python env loader |
 | `scripts/00_bootstrap.sh` | Production preflight: APIs, service agents, KMS key, build IAM |
 | `scripts/01_test_fixtures.sh` | Validation-only: the unapproved key and CAI export grants |
-| `scripts/02_conversation_key.sh` | The paired-region KMS keys the conversation surface needs (separate from the five layers) |
+| `layer3/deploy_conversation.sh` | Layer 3 for conversations: policy-gated CMEK conversation per location |
 | `common/gda_common.py` | Endpoint resolution + the single compliance verdict |
 | `layer1/` | OPA policy, unit tests, manifests, policy-gated deploy step |
 | `.regal/` | Regal lint config + a custom rule blocking the `regex.find_n` capture-group trap |
@@ -661,7 +664,7 @@ run against a project you care about:
 | `scripts/00_bootstrap.sh` | **Yes** | Production preflight only: APIs, the two service agents, the approved KMS key, and the build roles Layers 4 and 5 need |
 | `layer3/deploy.sh` | **Sample** | The table and agent it creates are samples. Replace them with your own datasource and manifest; keep the `render.sh` → `apply_manifest.py` pattern |
 | `scripts/01_test_fixtures.sh` | **No** | Validation only — the deliberately unapproved "rogue" key and CAI export grants. Never run it against a project you care about |
-| `scripts/02_conversation_key.sh` | **Yes** | Production preflight for the conversation surface: paired-region key rings and the two service-agent grants. Independent of the five layers, but not optional if any conversation is ever created in the estate |
+| `layer3/deploy_conversation.sh` | **Sample** | Creates a demo CMEK conversation per location to prove the key path. Production conversations come from your application; keep the `check_conversation_key` gate |
 | `layer2/deploy.sh` | **No** | It creates five *test personas* for the behavioural probe. Apply the persona model from [§6.2](docs/design.md#62-persona-model) to your real principals instead. The one piece worth lifting is the `gdaConversationUser` custom role it defines |
 | `layer4/` | **Yes** | Log sink → Pub/Sub → remediation function. Nothing to change beyond `config/shared.env.local` |
 | `layer5/` | **Yes** | Set `SCAN_LOCATIONS` and `APPROVED_KMS_PROJECTS` for your estate |

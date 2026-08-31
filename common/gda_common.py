@@ -35,6 +35,12 @@ CMEK_SUPPORTED_LOCATIONS = frozenset({"us-east4", "us", "eu"})
 CONVERSATION_KMS_LOCATION = {"us": "us-central1", "eu": "europe-west1"}
 CONVERSATION_LOCATIONS = frozenset(CONVERSATION_KMS_LOCATION)
 
+# The same paired region is also where the conversation lifecycle is AUDITED.
+# `cloudaicompanion` records a conversation created in `us` as a topic in
+# `us-central1`, so Layer 4 has to map back the other way to reach the
+# conversation. Derived, never written out twice, so the two cannot disagree.
+AUDIT_LOCATION_TO_CONVERSATION = {v: k for k, v in CONVERSATION_KMS_LOCATION.items()}
+
 # Multi-regions use a different endpoint template from true regions.
 _MULTI_REGIONS = frozenset({"us", "eu"})
 
@@ -54,6 +60,12 @@ UNSUPPORTED_LOCATION = "NON_COMPLIANT_CMEK_UNSUPPORTED_LOCATION"
 # yet to protect. Not a violation — an empty surface has no exposure — but not a
 # pass either.
 NO_CONVERSATIONS = "NO_CONVERSATIONS"
+
+# A `cloudaicompanion` topic, which is how a Conversation appears in audit logs.
+_TOPIC_NAME_RE = re.compile(
+    r"^projects/(?P<project>[^/]+)/locations/(?P<location>[^/]+)"
+    r"/topics/(?P<topic>[^/]+)$"
+)
 
 _CONVERSATION_NAME_RE = re.compile(
     r"^projects/(?P<project>[^/]+)/locations/(?P<location>[^/]+)"
@@ -178,6 +190,50 @@ def parse_conversation_name(resource_name: str) -> ConversationName | None:
     )
 
 
+def resolve_conversation_from_topic(proto_payload: dict) -> ConversationName | None:
+    """Work out which Conversation a `cloudaicompanion` audit entry refers to.
+
+    Conversations emit no `geminidataanalytics` audit log at all. Creating one
+    surfaces as ``TopicService.CreateTopic`` under
+    ``cloudaudit.googleapis.com/data_access``, and the entry names a *topic*:
+
+        projects/P/locations/us-central1/topics/CONVERSATION_ID
+
+    Two translations are needed before the resource can be re-read, and both are
+    measured rather than assumed (validation-report F8):
+
+    * **The topic ID is the conversation ID.** Verified for conversations
+      created in both ``us`` and ``eu``.
+    * **The audit location is the paired region, not the conversation's.** A
+      conversation in ``us`` is audited in ``us-central1``; one in ``eu``, in
+      ``europe-west1``. Same pairing the KMS key follows, applied in reverse.
+
+    As with ``resolve_agent_name``, the create emits two entries (F2's LRO
+    pattern): one naming only the parent, one naming the topic. Only the second
+    resolves, and None for the first is correct -- the sink filter drops it, and
+    a caller that sees None must not read it as a violation.
+
+    The payload carries no key: ``request``, ``response`` and
+    ``authorizationInfo`` are all null. Not a blocker, because the enforcer
+    re-reads the resource and never trusts the payload.
+    """
+    match = _TOPIC_NAME_RE.match(proto_payload.get("resourceName", "") or "")
+    if not match:
+        return None
+
+    location = AUDIT_LOCATION_TO_CONVERSATION.get(match["location"])
+    if location is None:
+        # A topic in a location that hosts no GDA conversation. cloudaicompanion
+        # also backs Code Assist and Cloud Assist, whose topics are not ours.
+        return None
+
+    return ConversationName(
+        project=match["project"],
+        location=location,
+        conversation_id=match["topic"],
+    )
+
+
 def evaluate_conversation_compliance(
     location: str,
     conversation_keys: list[str | None],
@@ -260,6 +316,61 @@ def evaluate_conversation_compliance(
         )
 
     return evaluate_compliance(location, distinct[0], approved_kms_projects)
+
+
+def check_conversation_key(
+    location: str,
+    kms_key: str | None,
+    approved_kms_projects: set[str] | frozenset[str],
+) -> Verdict:
+    """Pre-flight a conversation's key BEFORE CreateConversation is called.
+
+    The in-process twin of the Layer 1 ``conversation_keys`` rules, so a caller
+    that skips CI still cannot get it wrong. This exists as a separate function
+    from ``evaluate_compliance`` because of one extra check the agent path does
+    not need: the key must sit in the multi-region's paired primary region.
+
+    That check has to happen before the call, not after. Offering a key to
+    ``CreateConversation`` registers it permanently for the whole
+    project+location -- even when the create then fails for another reason --
+    and no API frees the slot (validation-report F8). A wrong key submitted once
+    cannot be replaced.
+    """
+    if location not in CONVERSATION_KMS_LOCATION:
+        return Verdict(
+            UNSUPPORTED_LOCATION,
+            f"Location '{location}' cannot host a CMEK conversation; supported: "
+            f"{sorted(CONVERSATION_KMS_LOCATION)}.",
+        )
+
+    if not kms_key:
+        return Verdict(MISSING_CMEK, "Missing mandatory CMEK (kms_key) parameter.")
+
+    match = _KMS_KEY_RE.match(kms_key)
+    if match is None:
+        return Verdict(
+            UNAPPROVED_KEY_PROJECT,
+            f"Malformed kms_key '{kms_key}'; cannot determine key project.",
+        )
+
+    if match["project"] not in approved_kms_projects:
+        return Verdict(
+            UNAPPROVED_KEY_PROJECT,
+            f"KMS key project '{match['project']}' is not in the approved list: "
+            f"{sorted(approved_kms_projects)}.",
+        )
+
+    required = CONVERSATION_KMS_LOCATION[location]
+    if match["location"] != required:
+        return Verdict(
+            UNSUPPORTED_LOCATION,
+            f"Conversations in '{location}' need a key in '{required}' (the "
+            f"paired region), but this key is in '{match['location']}'. "
+            f"Submitting it would permanently register the wrong key for "
+            f"'{location}'.",
+        )
+
+    return Verdict(COMPLIANT, f"Conversation key {kms_key} is valid for '{location}'.")
 
 
 def kms_key_project(kms_key: str | None) -> str | None:

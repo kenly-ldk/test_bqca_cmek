@@ -62,6 +62,7 @@ from gda_common import (
     evaluate_compliance,
     parse_approved_projects,
     resolve_agent_name,
+    resolve_conversation_from_topic,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -82,9 +83,31 @@ UNVERIFIABLE = "NON_COMPLIANT_UNVERIFIABLE"
 # Two passes needed to also flush `last_published_context`. See _remediate.
 REDACTION_PASSES = 2
 
+# What to do with a non-compliant CONVERSATION. Defaults to alert-only, and that
+# default is deliberate rather than timid.
+#
+# The agent path is recoverable-ish: redact, then SOFT delete, leaving a
+# scrubbed tombstone for ~30 days. A conversation has neither half. There is no
+# updatable content field to redact, and DeleteConversation is a HARD delete --
+# immediate NotFound, no tombstone, no undelete (validation-report F8). So
+# remediating a conversation destroys a live user session and its history
+# irreversibly, on the strength of an audit event.
+#
+# Alerting is the honest default for a control whose only available action is
+# destructive and irreversible. Set CONVERSATION_ACTION=delete once you have
+# watched the classifications in your own estate and accepted that trade.
+CONVERSATION_ACTION = os.getenv("CONVERSATION_ACTION", "alert").strip().lower()
+CONVERSATION_DELETE_ENABLED = CONVERSATION_ACTION == "delete"
+
 
 def _client(location: str) -> geminidataanalytics.DataAgentServiceClient:
     return geminidataanalytics.DataAgentServiceClient(
+        client_options=ClientOptions(api_endpoint=api_endpoint(location))
+    )
+
+
+def _chat_client(location: str) -> geminidataanalytics.DataChatServiceClient:
+    return geminidataanalytics.DataChatServiceClient(
         client_options=ClientOptions(api_endpoint=api_endpoint(location))
     )
 
@@ -200,6 +223,123 @@ def _remediate(agent, verdict: Verdict, caller: str, detected_at: float) -> None
     )
 
 
+def _remediate_conversation(
+    conversation, verdict: Verdict, caller: str, detected_at: float
+) -> None:
+    """Act on a non-compliant conversation.
+
+    Deliberately not symmetric with ``_remediate``. There is no redaction pass,
+    because a Conversation has no updatable content field, and the only
+    available action -- delete -- is a HARD delete with no tombstone and no
+    undelete. So the default is to alert and leave the resource alone; see
+    CONVERSATION_ACTION.
+    """
+    name = conversation.resource_name
+
+    if DRY_RUN or not CONVERSATION_DELETE_ENABLED:
+        _emit(
+            "CMEK_POLICY_VIOLATION_DETECTED_CONVERSATION",
+            "WARNING",
+            resource=name,
+            resource_type="CONVERSATION",
+            project=conversation.project,
+            location=conversation.location,
+            caller=caller,
+            status=verdict.status,
+            reason=verdict.reason,
+            action_taken="NONE_DRY_RUN" if DRY_RUN else "NONE_ALERT_ONLY",
+            residual_exposure=(
+                "The conversation still exists and its messages -- the question, "
+                "the generated SQL and the returned rows -- rest under "
+                "Google-managed encryption. CMEK cannot be added after creation."
+            ),
+            detection_latency_seconds=round(time.time() - detected_at, 3),
+        )
+        return
+
+    actions: list[str] = []
+    error = None
+    try:
+        _chat_client(conversation.location).delete_conversation(name=name)
+        actions.append("RESOURCE_HARD_DELETED")
+    except NotFound:
+        actions.append("ALREADY_ABSENT")
+    except GoogleAPICallError as exc:
+        actions.append("DELETE_FAILED")
+        error = f"delete: {type(exc).__name__}: {exc.message}"
+        logger.critical("[REMEDIATION FAILURE] %s: %s", name, error)
+
+    _emit(
+        "CMEK_POLICY_VIOLATION_REMEDIATED_CONVERSATION",
+        "CRITICAL" if "DELETE_FAILED" in actions else "WARNING",
+        resource=name,
+        resource_type="CONVERSATION",
+        project=conversation.project,
+        location=conversation.location,
+        caller=caller,
+        status=verdict.status,
+        reason=verdict.reason,
+        action_taken="+".join(actions),
+        # The one respect in which conversations are easier than agents: no
+        # 30-day readable tombstone to disclose (F1 vs F8).
+        residual_retention="none — DeleteConversation is a hard delete",
+        error=error,
+        remediation_latency_seconds=round(time.time() - detected_at, 3),
+    )
+
+
+def _handle_conversation(proto_payload: dict, caller: str, detected_at: float) -> bool:
+    """Evaluate a conversation create event. Returns False if this is not one.
+
+    The audit entry names a *topic* in the paired region and carries no key at
+    all -- request, response and authorizationInfo are null. That costs nothing,
+    because this re-reads the resource exactly as the agent path does and never
+    trusts the payload.
+    """
+    conversation = resolve_conversation_from_topic(proto_payload)
+    if conversation is None:
+        return False
+
+    name = conversation.resource_name
+    logger.info("Inspecting conversation %s created by %s", name, caller)
+
+    try:
+        live = _chat_client(conversation.location).get_conversation(name=name)
+        verdict = evaluate_compliance(
+            conversation.location, live.kms_key or None, APPROVED_KMS_PROJECTS
+        )
+    except NotFound:
+        # Hard delete, so this is routine: a short-lived conversation can be
+        # gone before the sink delivers its create event.
+        logger.info("[GONE] %s no longer exists; nothing to do.", name)
+        return True
+    except (FailedPrecondition, PermissionDenied) as exc:
+        verdict = Verdict(
+            UNVERIFIABLE,
+            f"Could not verify CMEK state ({type(exc).__name__}: {exc.message}). "
+            "Treating as non-compliant (fail-closed).",
+        )
+    except GoogleAPICallError as exc:
+        logger.error("Unexpected error verifying %s: %s", name, exc.message)
+        raise
+
+    if verdict.is_compliant:
+        _emit(
+            "CMEK_POLICY_COMPLIANT",
+            "INFO",
+            resource=name,
+            resource_type="CONVERSATION",
+            caller=caller,
+            status=verdict.status,
+            reason=verdict.reason,
+        )
+        return True
+
+    logger.error("[NON-COMPLIANCE] %s | %s", name, verdict.reason)
+    _remediate_conversation(conversation, verdict, caller, detected_at)
+    return True
+
+
 @functions_framework.cloud_event
 def process_audit_log(cloud_event) -> None:
     """Entry point. Receives a Cloud Logging entry via Pub/Sub."""
@@ -230,6 +370,19 @@ def process_audit_log(cloud_event) -> None:
     # The enforcer's own deletions must never re-trigger evaluation.
     if caller == os.getenv("ENFORCER_SA_EMAIL", "\0"):
         logger.info("Skipping self-generated event for %s", resource_name)
+        return
+
+    # Conversations first: their events come from a different service entirely
+    # (cloudaicompanion TopicService), so they can never be resolved as agents.
+    service = proto_payload.get("serviceName", "")
+    if service == "cloudaicompanion.googleapis.com" or "/topics/" in resource_name:
+        if _handle_conversation(proto_payload, caller, detected_at):
+            return
+        # A topic-shaped event we could not resolve. Most likely the parent-only
+        # half of the LRO pair (F2's pattern, which CreateTopic repeats), or a
+        # topic belonging to Code Assist rather than to GDA. Neither is a
+        # violation, so say so at INFO and stop.
+        logger.info("Unresolvable topic event, ignoring: %r (%s)", resource_name, method)
         return
 
     agent = resolve_agent_name(proto_payload)

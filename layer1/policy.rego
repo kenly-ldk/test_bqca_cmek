@@ -71,6 +71,25 @@ supported_locations := object.keys(required_key_location)
 required_key_location := {"us-east4": "us-east4", "us": "us", "eu": "europe"}
 
 # METADATA
+# title: required_conversation_key_location
+# description: |
+#   The Cloud KMS location a CONVERSATION's key must live in, per conversation
+#   location. Deliberately a second map rather than a reuse of
+#   required_key_location: a conversation takes a key in its multi-region's
+#   PAIRED primary region, which is a different location from the one the same
+#   multi-region's agents use, and the API rejects the other every time
+#   (validation-report F8).
+#
+#   `us-east4` and `global` are absent because neither can host a conversation.
+#   Gating this in CI matters more than the agent equivalent: the first key
+#   OFFERED to CreateConversation is registered permanently for the whole
+#   project+location even when the call fails, so a wrong key here cannot be
+#   corrected afterwards.
+required_conversation_key_location := {"us": "us-central1", "eu": "europe-west1"}
+
+conversation_locations := object.keys(required_conversation_key_location)
+
+# METADATA
 # title: allow
 # description: True only when no rule in `deny` fires. This is the CI entrypoint.
 # entrypoint: true
@@ -237,10 +256,21 @@ deny contains msg if {
 #
 #   Requiring the fields explicitly closes that, and keeps the failure mode
 #   consistent with Layer 4 and Layer 5 — unreadable is not compliant.
+#   A manifest that declares only `conversation_keys` is legitimate -- an estate
+#   may govern its conversation surface from a file of its own -- so the check is
+#   "declares at least one of the two", not "declares agents". A manifest with
+#   neither is still a typo, and still fails closed.
 deny contains msg if {
 	not input.agents
+	not input.conversation_keys
 
-	msg := "REJECTED [Malformed Manifest]: input has no 'agents' array."
+	msg := sprintf(
+		concat("", [
+			"REJECTED [Malformed Manifest]: input declares neither an 'agents' ",
+			"array nor a 'conversation_keys' array; nothing would be checked.",
+		]),
+		[],
+	)
 }
 
 deny contains msg if {
@@ -264,6 +294,108 @@ deny contains msg if {
 	msg := sprintf(
 		"REJECTED [Malformed Manifest]: agent at index %v ('%v') has no 'location'.",
 		[i, object.get(agent, "id", "<no id>")],
+	)
+}
+
+# METADATA
+# title: Conversation key missing
+# description: |
+#   A declared conversation location must name the key its conversations are to
+#   be created with. CMEK is opt-in per conversation, so a location with no key
+#   declared is a location whose conversations rest under Google-managed
+#   encryption.
+deny contains msg if {
+	some entry in input.conversation_keys
+	not entry.kms_key
+
+	msg := sprintf(
+		"REJECTED [Conversation Missing CMEK]: location '%v' declares no 'kms_key'.",
+		[object.get(entry, "location", "<no location>")],
+	)
+}
+
+# METADATA
+# title: Conversation unsupported location
+# description: |
+#   Only `us` and `eu` host conversations. `us-east4` cannot create one at all
+#   and `global` supports no CMEK, so a key declared for either is unusable.
+deny contains msg if {
+	some entry in input.conversation_keys
+	entry.location
+	not conversation_locations[entry.location]
+
+	msg := sprintf(
+		"REJECTED [Conversation Unsupported Location]: '%v' cannot host a CMEK conversation; supported: %v.",
+		[entry.location, conversation_locations],
+	)
+}
+
+# METADATA
+# title: Conversation unauthorized KMS project
+# description: Equivalent to constraints/gcp.restrictCmekCryptoKeyProjects.
+deny contains msg if {
+	some entry in input.conversation_keys
+	entry.kms_key
+
+	kms_proj := kms_key_project(entry.kms_key)
+	not approved_kms_projects[kms_proj]
+
+	msg := sprintf(
+		"REJECTED [Conversation Unauthorized KMS Project]: location '%v' uses KMS project '%v'. Allowed: %v",
+		[object.get(entry, "location", "<no location>"), kms_proj, approved_kms_projects],
+	)
+}
+
+# METADATA
+# title: Conversation key location mismatch
+# description: |
+#   The rule this gate exists for. The documented configuration -- a key in the
+#   conversation's own location -- is rejected by the API in every supported
+#   location; the key belongs in the multi-region's paired primary region. A
+#   pipeline that follows the documentation therefore fails at CreateConversation
+#   AFTER burning the project's one permanent key registration, so this has to be
+#   caught before the call is made.
+deny contains msg if {
+	some entry in input.conversation_keys
+	entry.kms_key
+	required := required_conversation_key_location[entry.location]
+
+	key_loc := kms_key_location(entry.kms_key)
+	key_loc != required
+
+	msg := sprintf(
+		concat("", [
+			"REJECTED [Conversation Key Location Mismatch]: conversations in ",
+			"'%v' need a key in '%v' (the paired region), but the key is in '%v'.",
+		]),
+		[entry.location, required, key_loc],
+	)
+}
+
+# METADATA
+# title: Conversation malformed key path
+# description: A malformed path would silently defeat the two rules above.
+deny contains msg if {
+	some entry in input.conversation_keys
+	entry.kms_key
+	not regex.match(`^projects/[^/]+/locations/[^/]+/keyRings/[^/]+/cryptoKeys/[^/]+$`, entry.kms_key)
+
+	msg := sprintf(
+		"REJECTED [Conversation Malformed Key]: location '%v' kms_key '%v' is not a valid cryptoKey path.",
+		[object.get(entry, "location", "<no location>"), entry.kms_key],
+	)
+}
+
+# METADATA
+# title: Conversation key entry without a location
+# description: A key with no location cannot be checked against the paired-region rule.
+deny contains msg if {
+	some i, entry in input.conversation_keys
+	not entry.location
+
+	msg := sprintf(
+		"REJECTED [Malformed Manifest]: conversation_keys entry %v has no 'location'.",
+		[i],
 	)
 }
 
