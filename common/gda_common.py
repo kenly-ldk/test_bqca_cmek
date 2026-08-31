@@ -56,10 +56,18 @@ COMPLIANT = "COMPLIANT"
 MISSING_CMEK = "NON_COMPLIANT_MISSING_CMEK"
 UNAPPROVED_KEY_PROJECT = "NON_COMPLIANT_UNAPPROVED_KEY_PROJECT"
 UNSUPPORTED_LOCATION = "NON_COMPLIANT_CMEK_UNSUPPORTED_LOCATION"
-# Conversations only: none exists in this project+location, so there is nothing
-# yet to protect. Not a violation — an empty surface has no exposure — but not a
-# pass either.
-NO_CONVERSATIONS = "NO_CONVERSATIONS"
+# Conversations only, and never a pass. A conversation is visible ONLY to the
+# principal that created it: measured against the live API, a service account
+# holding cloudaicompanion.topics.get -- and even roles/cloudaicompanion.
+# topicAdmin -- gets an empty ListConversations and a 404 on GetConversation for
+# a conversation another principal created (validation-report F8).
+#
+# So a scanner can never enumerate the conversation surface. An empty list means
+# "none that I created", which is indistinguishable from "hundreds, created by
+# your analysts". Reporting that as a clean bill of health is the exact
+# under-reporting failure this framework exists to prevent, so it is reported as
+# unverifiable instead.
+CONVERSATIONS_UNVERIFIABLE = "NON_COMPLIANT_UNVERIFIABLE_CONVERSATIONS"
 
 # A `cloudaicompanion` topic, which is how a Conversation appears in audit logs.
 _TOPIC_NAME_RE = re.compile(
@@ -241,81 +249,76 @@ def evaluate_conversation_compliance(
 ) -> Verdict:
     """Judge the CMEK posture of *conversations* in one project+location.
 
-    Conversations are governed differently from DataAgents, and the difference
-    is the whole reason this is a separate function rather than a second call to
-    ``evaluate_compliance``.
+    **This function can prove a violation. It can never prove compliance**, and
+    that asymmetry is a property of the platform rather than a limitation of the
+    implementation.
 
-    **CMEK on a conversation is real, and it is opt-in per conversation**
-    (validation-report F8, re-measured 2026-08-30). A conversation created with
-    a ``kms_key`` is genuinely protected: disable that key and both
-    ``GetConversation`` and ``ListMessages`` fail with a Firestore CMEK error,
-    within 2-5 minutes. A conversation created *without* one is not protected,
-    and — this is the point that drives the logic below — it **does not inherit
-    the key registered for its project+location**. It stays readable while that
-    key is disabled.
+    A conversation is visible only to the principal that created it. Measured
+    against the live API: a service account holding
+    ``cloudaicompanion.topics.get`` sees ``{}`` from ``ListConversations`` and
+    gets 404 from ``GetConversation`` for a conversation created by someone
+    else; granting ``roles/cloudaicompanion.topicAdmin`` changes nothing
+    (validation-report F8). No IAM configuration lets a scanner enumerate the
+    surface, so ``conversation_keys`` is always a partial view -- the
+    conversations the scanning identity happened to create, which in a real
+    estate is none of the ones that matter.
 
-    So the earlier model, one attestation per project+location, does not hold.
-    The API's "only 1 KMS keys per project per location" registry constrains
-    *which* key may be used; each caller independently decides *whether* to use
-    one. Two conversations side by side in the same location can therefore have
-    different postures, and reading the key off any one of them says nothing
-    about the rest. This function is given every key observed across the
-    conversations currently listed, and the location passes only if all of them
-    are protected by an approved key.
+    What follows:
 
-    That the registry exists is still worth knowing, because it is a squatting
-    hazard rather than a protection: the first key *offered* is registered even
-    if the create then fails, the caller needs only ``topics.create``, and the
-    slot can never be reassigned or freed. See F8.
+    * An **empty** list is NOT "no exposure". It is "nothing I can see", which
+      is indistinguishable from an estate full of unkeyed analyst conversations.
+      Reported as CONVERSATIONS_UNVERIFIABLE.
+    * An **unkeyed** conversation in the visible set IS a real violation --
+      seeing one proves it exists -- and is reported as MISSING_CMEK.
+    * An **all-keyed** visible set is still not a pass, because the invisible
+      remainder is unconstrained. Also CONVERSATIONS_UNVERIFIABLE, with the
+      count of what was checked.
 
-    ``conversation_keys`` is the list of ``kms_key`` values observed across the
-    conversations currently listed, one entry per conversation, ``None`` where
-    the conversation carries no key. Passing an empty list means no conversation
-    exists, which is reported as NO_CONVERSATIONS rather than a violation: an
-    empty surface carries no exposure.
-
-    Note this is a LIST-only view. A conversation whose key is already disabled
-    may be absent from LIST entirely (F4 on the agent side, same cause), so an
-    all-clear here means "every conversation this scan could see", not "every
-    conversation".
+    The consequence for the framework is that conversation governance is
+    preventive, not detective: Layer 1 gates the key, Layer 2 restricts who may
+    create a conversation at all, and the application must set ``kms_key`` on
+    every call. Layer 5 reports what it could not see rather than vouching for
+    it.
     """
-    if not conversation_keys:
-        return Verdict(
-            NO_CONVERSATIONS,
-            f"No conversations exist in '{location}', so there is no "
-            "conversation content to protect.",
-        )
-
     total = len(conversation_keys)
     unkeyed = sum(1 for key in conversation_keys if not key)
+
     if unkeyed:
-        # The common, expected drift case, and the reason this is checked before
-        # the registry anomaly below: it is concrete and actionable, where the
-        # anomaly only says the posture is unknown.
+        # A violation that is actually provable: this one was seen, and it has
+        # no key. Reported ahead of the visibility caveat because it is concrete
+        # and actionable.
         return Verdict(
             MISSING_CMEK,
-            f"{unkeyed} of {total} conversations in '{location}' carry no "
-            "kms_key. CMEK is opt-in per conversation and an unkeyed "
-            "conversation does not inherit the key registered for the "
-            "project+location, so its messages rest under Google-managed "
-            "encryption.",
+            f"{unkeyed} of {total} conversations visible in '{location}' carry "
+            "no kms_key, so their messages rest under Google-managed "
+            "encryption. Note this is a partial view: only conversations "
+            "created by the scanning identity are visible at all, so the true "
+            "count can only be higher.",
+        )
+
+    if not total:
+        return Verdict(
+            CONVERSATIONS_UNVERIFIABLE,
+            f"No conversations are visible in '{location}'. This does NOT mean "
+            "none exist: a conversation can only be read by the principal that "
+            "created it, so a scanner sees only its own. Treat the conversation "
+            "surface here as unverified, and govern it preventively (Layer 1 "
+            "gates the key, Layer 2 restricts who may create one).",
         )
 
     distinct = sorted({key for key in conversation_keys if key})
-    if len(distinct) > 1:
-        # Should be unreachable: the API registers one key per project+location
-        # and refuses every other one, including a key that does not exist. If
-        # this ever fires, that invariant has changed and the verdict below
-        # would be picking a winner among keys it cannot rank.
-        return Verdict(
-            UNAPPROVED_KEY_PROJECT,
-            f"Conversations in '{location}' report {len(distinct)} distinct "
-            f"kms_key values ({distinct}). The API is observed to allow only "
-            "one key per project per location; this contradicts that, so treat "
-            "the posture as unknown and re-verify before relying on it.",
-        )
+    for key in distinct:
+        verdict = evaluate_compliance(location, key, approved_kms_projects)
+        if verdict.status != COMPLIANT:
+            return verdict
 
-    return evaluate_compliance(location, distinct[0], approved_kms_projects)
+    return Verdict(
+        CONVERSATIONS_UNVERIFIABLE,
+        f"All {total} conversations visible in '{location}' use an approved "
+        "CMEK key, but that is not a pass: only conversations created by the "
+        "scanning identity are visible, and any created by another principal "
+        "could not be enumerated or read.",
+    )
 
 
 def check_conversation_key(

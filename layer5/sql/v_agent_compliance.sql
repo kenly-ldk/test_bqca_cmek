@@ -77,11 +77,12 @@ SELECT
     WHEN 'PENDING_CAI_INGESTION' THEN 'COMPLIANT_PENDING_CORROBORATION'
     WHEN 'NON_COMPLIANT_UNVERIFIABLE' THEN 'UNVERIFIED'
     WHEN 'NON_COMPLIANT_UNVERIFIABLE_SCAN_ERROR' THEN 'UNVERIFIED'
-    -- CONVERSATION_KEY rows only: no conversation exists in this
-    -- project+location, so no key is registered and there is no conversation
-    -- content to protect. An empty surface carries no exposure, so this is
-    -- neither a pass nor a finding.
-    WHEN 'NO_CONVERSATIONS' THEN 'NO_SURFACE_TO_PROTECT'
+    -- CONVERSATION_KEY rows only. NOT a pass, and deliberately not a separate
+    -- reassuring state either: a conversation is readable only by the principal
+    -- that created it, so the scanner sees only its own and can never enumerate
+    -- the surface. "I saw nothing" and "there is nothing" are indistinguishable
+    -- here, so both report UNVERIFIED (validation-report F8).
+    WHEN 'NON_COMPLIANT_UNVERIFIABLE_CONVERSATIONS' THEN 'UNVERIFIED'
     ELSE 'VERIFIED_VIOLATION'
   END AS verification_state
 FROM `${PROJECT_ID}.${BQ_DATASET}.${INVENTORY_TABLE}` AS i

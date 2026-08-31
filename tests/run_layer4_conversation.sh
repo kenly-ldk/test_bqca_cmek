@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Layer 4, conversation half.
 #
-#   unkeyed conversation -> must be DETECTED and reported, and must SURVIVE
-#                           (CONVERSATION_ACTION defaults to alert: deleting a
-#                            conversation is a hard delete of a live session)
-#   keyed conversation   -> must be classified COMPLIANT and survive
+#   BOTH conversations -> must be REPORTED with the caller attributed, must
+#                         NOT be judged compliant, and must SURVIVE.
+#
+# The enforcer cannot read a conversation it did not create -- 404 even with
+# roles/cloudaicompanion.topicAdmin -- so it can never verify a key. This gate
+# asserts the honest behaviour: detection and attribution, and specifically the
+# ABSENCE of a compliance claim.
 #
 # Separate from run_layer4.sh because the two halves need different estates: the
 # agent matrix needs the rogue-key project and run-scoped agent IDs, while this
@@ -108,7 +111,7 @@ while [[ "${SECONDS}" -lt "${DEADLINE}" ]]; do
   ENTRIES="$(gcloud logging read \
     "resource.type=cloud_run_revision AND jsonPayload.resource_type=CONVERSATION" \
     --project="${PROJECT_ID}" --freshness=20m --limit=50 \
-    --format='value(jsonPayload.resource,jsonPayload.security_event,jsonPayload.action_taken)' 2>/dev/null || true)"
+    --format='value(jsonPayload.resource,jsonPayload.security_event,jsonPayload.status,jsonPayload.action_taken,jsonPayload.caller)' 2>/dev/null || true)"
   KEYED_VERDICT="$(grep -F "${KEYED_ID}" <<<"${ENTRIES}" | head -1 || true)"
   UNKEYED_VERDICT="$(grep -F "${UNKEYED_ID}" <<<"${ENTRIES}" | head -1 || true)"
   [[ -n "${KEYED_VERDICT}" && -n "${UNKEYED_VERDICT}" ]] && break
@@ -116,24 +119,29 @@ while [[ "${SECONDS}" -lt "${DEADLINE}" ]]; do
 done
 
 log "3. Verdicts"
-if [[ -n "${UNKEYED_VERDICT}" ]]; then
-  grep -q "CMEK_POLICY_VIOLATION_DETECTED_CONVERSATION" <<<"${UNKEYED_VERDICT}" \
-    && check "unkeyed conversation DETECTED" 0 "${UNKEYED_VERDICT}" \
-    || check "unkeyed conversation DETECTED" 1 "unexpected event: ${UNKEYED_VERDICT}"
-  # The payload carries no key, so a detection at all proves the enforcer
-  # re-read the resource rather than classifying from the audit entry.
-  check "enforcer re-read the resource to get the key" 0 \
-    "the audit payload has request/response/authorizationInfo all null"
-else
-  check "unkeyed conversation DETECTED" 1 "no verdict within ${WINDOW_SECONDS}s"
-fi
+# What this can and cannot assert changed once the visibility ceiling was
+# measured. A conversation is readable only by the principal that created it,
+# so the enforcer -- a different identity -- can never read the key and can
+# never rule on compliance. Both conversations must therefore be REPORTED, and
+# neither may be judged.
+for PAIR in "keyed:${KEYED_VERDICT}" "unkeyed:${UNKEYED_VERDICT}"; do
+  LABEL="${PAIR%%:*}"; VERDICT="${PAIR#*:}"
+  if [[ -z "${VERDICT}" ]]; then
+    check "${LABEL} conversation reported" 1 "no event within ${WINDOW_SECONDS}s"
+    continue
+  fi
+  grep -q "CONVERSATION_CREATED_CMEK_UNVERIFIABLE" <<<"${VERDICT}" \
+    && check "${LABEL} conversation reported and attributed" 0 "${VERDICT}" \
+    || check "${LABEL} conversation reported and attributed" 1 "unexpected event: ${VERDICT}"
+done
 
-if [[ -n "${KEYED_VERDICT}" ]]; then
-  grep -q "CMEK_POLICY_COMPLIANT" <<<"${KEYED_VERDICT}" \
-    && check "keyed conversation COMPLIANT" 0 "${KEYED_VERDICT}" \
-    || check "keyed conversation COMPLIANT" 1 "unexpected event: ${KEYED_VERDICT}"
+# The regression that matters most: the enforcer must never claim a conversation
+# is compliant, because it cannot see one well enough to know.
+if grep -q "CMEK_POLICY_COMPLIANT" <<<"${KEYED_VERDICT}${UNKEYED_VERDICT}"; then
+  check "no false compliance claim" 1 \
+    "the enforcer reported a conversation COMPLIANT, which it cannot verify"
 else
-  check "keyed conversation COMPLIANT" 1 "no verdict within ${WINDOW_SECONDS}s"
+  check "no false compliance claim" 0 "no conversation was vouched for"
 fi
 
 log "4. Both conversations must still exist (alert-only is the default)"

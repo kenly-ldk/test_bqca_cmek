@@ -31,7 +31,7 @@ from _loader import load_scanner
 from gda_common import (
     COMPLIANT,
     MISSING_CMEK,
-    NO_CONVERSATIONS,
+    CONVERSATIONS_UNVERIFIABLE,
     UNAPPROVED_KEY_PROJECT,
     UNSUPPORTED_LOCATION,
     check_conversation_key,
@@ -48,15 +48,6 @@ ROGUE = "projects/rogue-project/locations/us-east4/keyRings/kr/cryptoKeys/k"
 
 
 # --- the verdict ------------------------------------------------------------
-
-
-def test_keyed_conversation_with_an_approved_key_is_compliant():
-    assert evaluate_conversation_compliance("us-east4", [GOOD], APPROVED).status == COMPLIANT
-
-
-def test_many_conversations_sharing_one_key_is_one_verdict():
-    """N conversations, all keyed with the location's one registered key."""
-    assert evaluate_conversation_compliance("us-east4", [GOOD] * 50, APPROVED).status == COMPLIANT
 
 
 def test_unapproved_key_is_a_violation():
@@ -78,6 +69,51 @@ def test_one_unkeyed_conversation_condemns_the_location():
     assert "1 of 50" in verdict.reason
 
 
+# --- the visibility ceiling ------------------------------------------------
+#
+# These are the tests that were missing when Layer 5's conversation reporting
+# was first written, and their absence let it emit a false all-clear.
+#
+# A conversation is readable only by the principal that created it: measured
+# against the live API, a service account with cloudaicompanion.topics.get sees
+# {} from ListConversations and 404 from GetConversation for another
+# principal's conversation, and roles/cloudaicompanion.topicAdmin does not lift
+# it. A scanner therefore CANNOT enumerate the surface, and no result it gets
+# can ever mean "compliant".
+
+
+def test_no_input_can_produce_a_compliant_verdict():
+    """The property that matters: this function can prove a violation and can
+    never prove compliance. Asserted exhaustively rather than case by case, so
+    a future edit cannot reintroduce a pass."""
+    for keys in ([], [GOOD], [GOOD] * 50, [None], [GOOD, None],
+                 [ROGUE], [GOOD, OTHER_APPROVED]):
+        assert not evaluate_conversation_compliance("us", keys, APPROVED).is_compliant
+
+
+def test_empty_is_unverifiable_not_a_clean_bill_of_health():
+    """'I saw nothing' is indistinguishable from 'your analysts have hundreds'."""
+    verdict = evaluate_conversation_compliance("us", [], APPROVED)
+    assert verdict.status == CONVERSATIONS_UNVERIFIABLE
+    assert "does NOT mean" in verdict.reason
+
+
+def test_all_visible_conversations_keyed_is_still_not_a_pass():
+    """The invisible remainder is unconstrained, so a clean visible set proves
+    nothing about the location."""
+    verdict = evaluate_conversation_compliance("us", [GOOD, GOOD], APPROVED)
+    assert verdict.status == CONVERSATIONS_UNVERIFIABLE
+    assert "not a pass" in verdict.reason
+
+
+def test_a_visible_unkeyed_conversation_is_still_a_real_violation():
+    """Visibility is partial, but what IS seen is proof. A violation must not be
+    downgraded to 'unverifiable' just because the view is incomplete."""
+    verdict = evaluate_conversation_compliance("us", [None], APPROVED)
+    assert verdict.status == MISSING_CMEK
+    assert "only be higher" in verdict.reason
+
+
 def test_unkeyed_count_is_reported_so_the_row_is_actionable():
     verdict = evaluate_conversation_compliance("us-east4", [None, GOOD, None], APPROVED)
     assert "2 of 3" in verdict.reason
@@ -89,33 +125,28 @@ def test_unkeyed_is_reported_before_an_unapproved_key():
     assert verdict.status == MISSING_CMEK
 
 
-def test_no_conversations_is_not_a_violation():
-    """An empty surface carries no exposure — but it is not a pass either."""
+def test_empty_result_is_never_reported_as_safe():
     verdict = evaluate_conversation_compliance("us-east4", [], APPROVED)
-    assert verdict.status == NO_CONVERSATIONS
+    assert verdict.status == CONVERSATIONS_UNVERIFIABLE
     assert not verdict.is_compliant
 
 
 def test_unsupported_location_still_wins():
-    assert evaluate_conversation_compliance("global", [GOOD], APPROVED).status == UNSUPPORTED_LOCATION
+    """A key in a location that cannot host a conversation is a real finding,
+    not merely unverifiable."""
+    assert evaluate_conversation_compliance("global", [GOOD, None], APPROVED).status == MISSING_CMEK
+    assert evaluate_conversation_compliance("global", [ROGUE], APPROVED).status == UNSUPPORTED_LOCATION
 
 
-def test_conflicting_keys_are_flagged_rather_than_averaged():
-    """Should be unreachable while the API registers one key per location.
+# Two distinct keys in one location contradicted the API's one-key registry and
+# used to be flagged as an anomaly. That branch is gone, and deliberately: every
+# all-keyed result is now UNVERIFIABLE regardless, so there was never a winner
+# to pick between keys. The property below is what replaced it.
 
-    Unlike a mix of keyed and unkeyed — which is normal, because CMEK is opt-in
-    — two *different* keys contradict a measured invariant. If it ever fires,
-    say the posture is unknown rather than silently picking a winner.
-    """
+
+def test_conflicting_keys_are_still_never_a_pass():
     verdict = evaluate_conversation_compliance("us-east4", [GOOD, OTHER_APPROVED], APPROVED)
     assert not verdict.is_compliant
-    assert "distinct" in verdict.reason
-
-
-def test_conflicting_keys_flagged_even_when_all_are_approved():
-    """Both keys are in approved projects; the contradiction is still the story."""
-    verdict = evaluate_conversation_compliance("us-east4", [GOOD, OTHER_APPROVED], APPROVED)
-    assert verdict.status != COMPLIANT
 
 
 # --- resource naming --------------------------------------------------------
@@ -163,10 +194,12 @@ def test_one_row_per_location_not_per_conversation(conv_rows):
 
 
 def test_row_records_an_observed_key(conv_rows):
+    """The key seen is still recorded — it is evidence — but the row must not
+    be marked compliant on the strength of a partial view."""
     rows = conv_rows({"us-east4": ([GOOD], None)})
     assert rows["us-east4"]["configured_kms_key"] == GOOD
     assert rows["us-east4"]["kms_key_project"] == "approved-a"
-    assert rows["us-east4"]["compliance_status"] == COMPLIANT
+    assert rows["us-east4"]["compliance_status"] == CONVERSATIONS_UNVERIFIABLE
 
 
 def test_row_never_claims_cai_corroboration(conv_rows):
@@ -180,7 +213,7 @@ def test_unreadable_location_yields_scan_error_not_a_clean_bill(conv_rows):
     row = rows["us-east4"]
     assert row["compliance_status"] == scanner.SCAN_INCOMPLETE
     assert row["visible_in_api"] is False
-    assert row["compliance_status"] != NO_CONVERSATIONS
+    assert row["compliance_status"] != CONVERSATIONS_UNVERIFIABLE
 
 
 def test_unreadable_location_is_not_confused_with_empty(conv_rows):
@@ -188,7 +221,7 @@ def test_unreadable_location_is_not_confused_with_empty(conv_rows):
     broken = conv_rows({"us-east4": ([], "PermissionDenied: nope")})["us-east4"]
     empty = conv_rows({"us-east4": ([], None)})["us-east4"]
     assert broken["compliance_status"] != empty["compliance_status"]
-    assert empty["compliance_status"] == NO_CONVERSATIONS
+    assert empty["compliance_status"] == CONVERSATIONS_UNVERIFIABLE
 
 
 def test_rows_carry_no_conversation_content(conv_rows):

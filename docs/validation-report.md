@@ -488,39 +488,70 @@ same-location rule for both.
 The remaining conversation behaviours are unchanged from the previous reading and
 were re-confirmed:
 
-* **The lifecycle is audited only as Data Access, under a different service —
-  but that is enough for Layer 4.** `CreateConversation`, `GetConversation`,
-  `ListConversations` and `DeleteConversation` emit nothing under
-  `geminidataanalytics.googleapis.com`. They appear as
-  `cloudaicompanion.v1.TopicService.CreateTopic` / `GetTopic` /
+* **A conversation is readable only by the principal that created it.** This is
+  the single most consequential fact on this surface, it was found only by
+  deploying Layer 4 and watching it fail, and it defeats every detective control
+  by construction. Measured 2026-08-31 against a conversation created by
+  `admin@`:
+
+  | Reading identity | `ListConversations` | `GetConversation` |
+  | :--- | :--- | :--- |
+  | the creator | returns it | 200, full resource |
+  | service account + `cloudaicompanion.topics.get` | `{}` | **404 NOT_FOUND** |
+  | service account + **`roles/cloudaicompanion.topicAdmin`** | `{}` | **404 NOT_FOUND** |
+
+  `topicAdmin` is the most privileged role on the resource — it carries
+  `topics.delete` and `topics.setIamPolicy` — and it still cannot see another
+  principal's conversation. The 404 rather than 403 is the tell, and it matches
+  the list method being named `FindReadableTopics`. No IAM configuration was
+  found that lifts this.
+
+  Two controls fall out of it, and the second is the dangerous one:
+
+  * **Layer 4 cannot verify a conversation, only attribute it.** Its whole
+    design is to distrust the audit payload and re-read the resource; here the
+    re-read returns 404 forever. It reports that a conversation was created,
+    where, and by whom — genuinely useful, and recorded nowhere else — but
+    `NON_COMPLIANT_UNVERIFIABLE` is the only verdict it can honestly reach. It
+    cannot delete one either, so there is no remediation path at all.
+  * **Layer 5 cannot enumerate the surface, and must never report it clean.**
+    The scanner's service account sees `{}` in a location full of analyst
+    conversations. An earlier implementation read that as `NO_CONVERSATIONS` —
+    *"no conversation content to protect"* — which is a **false all-clear on a
+    regulator-facing table**, the precise under-reporting failure this framework
+    exists to prevent. `evaluate_conversation_compliance` now refuses to return
+    COMPLIANT under any input: a visible unkeyed conversation is a proven
+    violation, and everything else is `UNVERIFIABLE`.
+
+  **Conversation governance is therefore preventive, not detective.** Layer 1
+  gates the key before `CreateConversation` is called, Layer 2 restricts who may
+  call it at all, and the application must set `kms_key` every time. Nothing
+  downstream can check that it did.
+
+* **The lifecycle is audited only as Data Access, under a different service.**
+  `CreateConversation`, `GetConversation`, `ListConversations` and
+  `DeleteConversation` emit nothing under `geminidataanalytics.googleapis.com`.
+  They appear as `cloudaicompanion.v1.TopicService.CreateTopic` / `GetTopic` /
   `FindReadableTopics` / `DeleteTopic` — in
   `cloudaudit.googleapis.com/data_access`, which is **off by default** and has
-  to be enabled per service. Even then the entries carry `request: null`,
-  `response: null` and `authorizationInfo: null`: no key, no agent, no content.
+  to be enabled per service, for the whole of `cloudaicompanion` including Code
+  Assist. The entries carry `request: null`, `response: null` and
+  `authorizationInfo: null`.
 
-  An earlier reading concluded from that payload that **Layer 4 could never
-  cover conversations**. That was wrong, and wrong by the same mistake twice:
-  it assumed the control needs the key to be *in* the event. Layer 4 has never
-  trusted the audit payload for agents either — it re-reads the resource,
-  because `kms_key` is immutable and the server's value is the only
-  authoritative one. Measured on 2026-08-31, every link the re-read needs is
-  present:
+  What the entries *do* carry is enough to attribute: `CreateTopic` fires for
+  both `us` and `eu` in the same two-entry LRO pair as `CreateDataAgent` (F2),
+  the topic ID **is** the conversation ID, the audit location is the paired
+  region (so the key mapping inverts to recover it), and `principalEmail`
+  identifies the caller. That is what Layer 4's conversation half is built on,
+  and it is all it can be built on.
 
-  | Needed | Present? |
-  | :--- | :--- |
-  | A create event | **Yes** — `TopicService.CreateTopic`, in the same two-entry LRO pair as `CreateDataAgent` (F2) |
-  | Something that identifies the resource | **Yes** — the topic ID *is* the conversation ID, verified in `us` and `eu` |
-  | Its location | The **paired** region: a `us` conversation is audited in `us-central1`, an `eu` one in `europe-west1`. Invert the key mapping to recover it |
-  | The caller | **Yes** — `authenticationInfo.principalEmail` |
-  | The key | **No** — and it does not matter; `GetConversation` supplies it |
+  An earlier reading of this finding concluded that the null payload was what
+  made Layer 4 impossible. That reasoning was wrong — the enforcer never trusted
+  the payload for agents either — and disproving it led to building a control
+  that then failed on the visibility ceiling above. The conclusion was right for
+  the wrong reason, and testing only the reason is how three days were spent
+  building something that could not work.
 
-  Two real constraints remain. The Data Access logs must be enabled, and they
-  cover the whole `cloudaicompanion` service — Code Assist and Cloud Assist
-  included — so the volume is not GDA's alone. And **remediation is not
-  symmetric with the agent path**: a conversation has no updatable content field
-  to redact and `DeleteConversation` is a hard delete, so the only available
-  action destroys a live session irreversibly. The enforcer therefore defaults
-  to alerting (`CONVERSATION_ACTION=alert`) and deletes only when told to.
 * **Delete is a hard delete** — the opposite of `DeleteDataAgent` (F1).
   Immediately after `DeleteConversation`: `GetConversation` returns `NotFound`,
   `ListMessages` returns `NotFound`, the conversation is absent from
@@ -641,15 +672,15 @@ the residual retention to risk and compliance.
 
 **This covers DataAgents only.** The table above, and every number in it, is
 about agents. Conversations — the questions, the generated SQL and the returned
-rows — sit outside those numbers. They *can* be CMEK-encrypted, but only with a
-key in the paired region and only when the caller opts in per conversation, and
-Cloud Asset Inventory cannot enumerate them at all (F8). The enforcer does see
-them, once Data Access logging is enabled on `cloudaicompanion`, but what it can
-*do* differs: there is no content field to redact and delete is irreversible, so
-it alerts by default. The agent-side guarantee is "non-compliant for 13–30 s,
-then neutralised"; the conversation-side guarantee is "detected in seconds and
-reported, neutralised only if you have accepted that deleting a live session is
-the right response". Their one favourable property is that `DeleteConversation` is a
+rows — sit outside those numbers, and no equivalent number exists for them.
+They *can* be CMEK-encrypted, but only with a key in the paired region and only
+when the caller opts in per conversation; Cloud Asset Inventory cannot enumerate
+them, and neither can anything else, because a conversation is readable only by
+the principal that created it (F8). The agent-side guarantee is "non-compliant
+for 13–30 s, then neutralised". There is no conversation-side guarantee at all:
+the enforcer can report that one was created and by whom, and nothing can
+confirm whether it carried a key. State that plainly to risk and compliance
+rather than implying parity. Their one favourable property is that `DeleteConversation` is a
 **hard** delete, so unlike an agent there is no 30-day readable tombstone and no
 residual retention to disclose. Do not let the agent-side numbers be read as
 covering the conversation surface; state the two separately.

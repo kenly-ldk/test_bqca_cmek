@@ -171,6 +171,14 @@ def scan_conversation_keys() -> dict[str, tuple[list[str | None], str | None]]:
     for the project+location (F8), so two conversations in the same location can
     disagree and the key off any one of them proves nothing about the others.
 
+    More importantly, this list is ALWAYS PARTIAL and usually empty. A
+    conversation is visible only to the principal that created it: measured
+    live, this scanner's service account gets `{}` from list_conversations for a
+    location full of conversations created by analysts, and 404 on a direct
+    read. roles/cloudaicompanion.topicAdmin does not lift it. So an empty result
+    means "none that I created", never "none exist", and
+    evaluate_conversation_compliance is written to refuse to call that clean.
+
     Returns {location: (observed keys, error or None)}.
     """
     found: dict[str, tuple[list[str | None], str | None]] = {}

@@ -22,6 +22,43 @@ for ROLE in roles/geminidataanalytics.dataAgentOwner roles/logging.logWriter; do
   echo "  granted ${ROLE}"
 done
 
+# Reading a CONVERSATION back needs a permission from a different service.
+# geminidataanalytics does not gate conversations at all -- GetConversation is
+# authorized by `cloudaicompanion.topics.get` -- so dataAgentOwner grants the
+# enforcer nothing here.
+#
+# Without this the enforcer still behaves correctly, and that is precisely why
+# it is easy to miss: the GET fails with PermissionDenied, the enforcer fails
+# closed, and EVERY conversation is reported NON_COMPLIANT_UNVERIFIABLE. The
+# alerts look like a working control while no key is ever actually checked.
+# Caught by tests/run_layer4_conversation.sh, which asserts a real verdict
+# rather than merely "something was flagged".
+#
+# No predefined role grants topics.get alone, so this is a custom role. It is
+# read-only on purpose, and read-only is also the ceiling: see below.
+CONV_READER_ROLE="gdaCmekEnforcerConversationReader"
+if ! gcloud iam roles describe "${CONV_READER_ROLE}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+  gcloud iam roles create "${CONV_READER_ROLE}" --project="${PROJECT_ID}" \
+    --title="GDA CMEK enforcer — conversation reader" \
+    --description="Read a Conversation back to verify its CMEK key. Read-only." \
+    --permissions="cloudaicompanion.topics.get" --stage=GA --quiet >/dev/null
+  echo "  created custom role ${CONV_READER_ROLE}"
+else
+  echo "  custom role ${CONV_READER_ROLE} exists"
+fi
+gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="projects/${PROJECT_ID}/roles/${CONV_READER_ROLE}" \
+  --condition=None --quiet >/dev/null
+echo "  granted ${CONV_READER_ROLE} (cloudaicompanion.topics.get)"
+
+# There is no delete path for conversations, and adding one would not help.
+# `cloudaicompanion.topics.delete` is NOT_SUPPORTED in custom roles, only
+# roles/cloudaicompanion.topicAdmin carries it -- and topicAdmin was tested
+# here: it still returns 404 for a conversation another principal created, so
+# the enforcer could not delete one even holding it. Conversations are
+# detect-and-attribute only (validation-report F8).
+
 log "Pub/Sub topic ${PUBSUB_TOPIC}"
 gcloud pubsub topics create "${PUBSUB_TOPIC}" --project="${PROJECT_ID}" 2>/dev/null || echo "  exists"
 

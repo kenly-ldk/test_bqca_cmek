@@ -83,21 +83,27 @@ UNVERIFIABLE = "NON_COMPLIANT_UNVERIFIABLE"
 # Two passes needed to also flush `last_published_context`. See _remediate.
 REDACTION_PASSES = 2
 
-# What to do with a non-compliant CONVERSATION. Defaults to alert-only, and that
-# default is deliberate rather than timid.
+# Conversations are DETECT-AND-ATTRIBUTE only, and cannot be otherwise.
 #
-# The agent path is recoverable-ish: redact, then SOFT delete, leaving a
-# scrubbed tombstone for ~30 days. A conversation has neither half. There is no
-# updatable content field to redact, and DeleteConversation is a HARD delete --
-# immediate NotFound, no tombstone, no undelete (validation-report F8). So
-# remediating a conversation destroys a live user session and its history
-# irreversibly, on the strength of an audit event.
+# A conversation is readable solely by the principal that created it. Measured
+# against the live API: this service account, holding
+# cloudaicompanion.topics.get, gets an empty ListConversations and a 404 from
+# GetConversation for a conversation another principal created -- and granting
+# roles/cloudaicompanion.topicAdmin, the most privileged role on the resource,
+# changes nothing (validation-report F8).
 #
-# Alerting is the honest default for a control whose only available action is
-# destructive and irreversible. Set CONVERSATION_ACTION=delete once you have
-# watched the classifications in your own estate and accepted that trade.
-CONVERSATION_ACTION = os.getenv("CONVERSATION_ACTION", "alert").strip().lower()
-CONVERSATION_DELETE_ENABLED = CONVERSATION_ACTION == "delete"
+# Two consequences, both structural:
+#
+#   * The enforcer can never read a conversation's kms_key, so it can never
+#     issue a compliance verdict on one. It reports the create and names the
+#     caller; that is the whole of what it can honestly claim.
+#   * It could not delete one either, for the same reason -- DeleteConversation
+#     on an invisible resource is a 404. There is deliberately no remediation
+#     path here rather than one that silently no-ops.
+#
+# The control that actually binds is preventive: Layer 1 gates the key, Layer 2
+# restricts who may call CreateConversation at all, and the application sets
+# kms_key on every call.
 
 
 def _client(location: str) -> geminidataanalytics.DataAgentServiceClient:
@@ -223,23 +229,46 @@ def _remediate(agent, verdict: Verdict, caller: str, detected_at: float) -> None
     )
 
 
-def _remediate_conversation(
-    conversation, verdict: Verdict, caller: str, detected_at: float
-) -> None:
-    """Act on a non-compliant conversation.
+def _handle_conversation(proto_payload: dict, caller: str, detected_at: float) -> bool:
+    """Report a conversation create. Returns False if this is not one.
 
-    Deliberately not symmetric with ``_remediate``. There is no redaction pass,
-    because a Conversation has no updatable content field, and the only
-    available action -- delete -- is a HARD delete with no tombstone and no
-    undelete. So the default is to alert and leave the resource alone; see
-    CONVERSATION_ACTION.
+    Not symmetric with the agent path, and cannot be. The agent path re-reads
+    the resource because the audit payload is untrustworthy; here the re-read is
+    attempted and expected to fail, because the resource is invisible to every
+    principal except its creator (F8). What survives is the part that still has
+    value: a conversation was created, here, by this caller, at this time --
+    which is otherwise recorded nowhere a compliance team will look.
     """
-    name = conversation.resource_name
+    conversation = resolve_conversation_from_topic(proto_payload)
+    if conversation is None:
+        return False
 
-    if DRY_RUN or not CONVERSATION_DELETE_ENABLED:
+    name = conversation.resource_name
+    kms_key = None
+    readable = False
+    try:
+        live = _chat_client(conversation.location).get_conversation(name=name)
+        kms_key, readable = live.kms_key or None, True
+    except NotFound:
+        # The normal outcome, not an error: the enforcer did not create this
+        # conversation, so it cannot see it.
+        pass
+    except (FailedPrecondition, PermissionDenied) as exc:
+        logger.info("Read of %s refused (%s)", name, type(exc).__name__)
+    except GoogleAPICallError as exc:
+        logger.error("Unexpected error reading %s: %s", name, exc.message)
+        raise
+
+    if readable:
+        # Only reachable for a conversation this identity created. Kept because
+        # it costs nothing and is the one case where a real verdict exists.
+        verdict = evaluate_compliance(
+            conversation.location, kms_key, APPROVED_KMS_PROJECTS
+        )
         _emit(
-            "CMEK_POLICY_VIOLATION_DETECTED_CONVERSATION",
-            "WARNING",
+            "CMEK_POLICY_COMPLIANT" if verdict.is_compliant
+            else "CMEK_POLICY_VIOLATION_DETECTED_CONVERSATION",
+            "INFO" if verdict.is_compliant else "WARNING",
             resource=name,
             resource_type="CONVERSATION",
             project=conversation.project,
@@ -247,96 +276,30 @@ def _remediate_conversation(
             caller=caller,
             status=verdict.status,
             reason=verdict.reason,
-            action_taken="NONE_DRY_RUN" if DRY_RUN else "NONE_ALERT_ONLY",
-            residual_exposure=(
-                "The conversation still exists and its messages -- the question, "
-                "the generated SQL and the returned rows -- rest under "
-                "Google-managed encryption. CMEK cannot be added after creation."
-            ),
+            action_taken="NONE_ALERT_ONLY",
             detection_latency_seconds=round(time.time() - detected_at, 3),
         )
-        return
-
-    actions: list[str] = []
-    error = None
-    try:
-        _chat_client(conversation.location).delete_conversation(name=name)
-        actions.append("RESOURCE_HARD_DELETED")
-    except NotFound:
-        actions.append("ALREADY_ABSENT")
-    except GoogleAPICallError as exc:
-        actions.append("DELETE_FAILED")
-        error = f"delete: {type(exc).__name__}: {exc.message}"
-        logger.critical("[REMEDIATION FAILURE] %s: %s", name, error)
+        return True
 
     _emit(
-        "CMEK_POLICY_VIOLATION_REMEDIATED_CONVERSATION",
-        "CRITICAL" if "DELETE_FAILED" in actions else "WARNING",
+        "CONVERSATION_CREATED_CMEK_UNVERIFIABLE",
+        "WARNING",
         resource=name,
         resource_type="CONVERSATION",
         project=conversation.project,
         location=conversation.location,
         caller=caller,
-        status=verdict.status,
-        reason=verdict.reason,
-        action_taken="+".join(actions),
-        # The one respect in which conversations are easier than agents: no
-        # 30-day readable tombstone to disclose (F1 vs F8).
-        residual_retention="none — DeleteConversation is a hard delete",
-        error=error,
-        remediation_latency_seconds=round(time.time() - detected_at, 3),
+        status=UNVERIFIABLE,
+        reason=(
+            "A conversation was created. Its CMEK state cannot be determined by "
+            "this or any other principal: a conversation is readable only by "
+            "its creator, and even roles/cloudaicompanion.topicAdmin returns 404 "
+            "(validation-report F8). Govern this surface preventively — Layer 1 "
+            "gates the key, Layer 2 restricts who may create one."
+        ),
+        action_taken="NONE_CANNOT_READ",
+        detection_latency_seconds=round(time.time() - detected_at, 3),
     )
-
-
-def _handle_conversation(proto_payload: dict, caller: str, detected_at: float) -> bool:
-    """Evaluate a conversation create event. Returns False if this is not one.
-
-    The audit entry names a *topic* in the paired region and carries no key at
-    all -- request, response and authorizationInfo are null. That costs nothing,
-    because this re-reads the resource exactly as the agent path does and never
-    trusts the payload.
-    """
-    conversation = resolve_conversation_from_topic(proto_payload)
-    if conversation is None:
-        return False
-
-    name = conversation.resource_name
-    logger.info("Inspecting conversation %s created by %s", name, caller)
-
-    try:
-        live = _chat_client(conversation.location).get_conversation(name=name)
-        verdict = evaluate_compliance(
-            conversation.location, live.kms_key or None, APPROVED_KMS_PROJECTS
-        )
-    except NotFound:
-        # Hard delete, so this is routine: a short-lived conversation can be
-        # gone before the sink delivers its create event.
-        logger.info("[GONE] %s no longer exists; nothing to do.", name)
-        return True
-    except (FailedPrecondition, PermissionDenied) as exc:
-        verdict = Verdict(
-            UNVERIFIABLE,
-            f"Could not verify CMEK state ({type(exc).__name__}: {exc.message}). "
-            "Treating as non-compliant (fail-closed).",
-        )
-    except GoogleAPICallError as exc:
-        logger.error("Unexpected error verifying %s: %s", name, exc.message)
-        raise
-
-    if verdict.is_compliant:
-        _emit(
-            "CMEK_POLICY_COMPLIANT",
-            "INFO",
-            resource=name,
-            resource_type="CONVERSATION",
-            caller=caller,
-            status=verdict.status,
-            reason=verdict.reason,
-        )
-        return True
-
-    logger.error("[NON-COMPLIANCE] %s | %s", name, verdict.reason)
-    _remediate_conversation(conversation, verdict, caller, detected_at)
     return True
 
 

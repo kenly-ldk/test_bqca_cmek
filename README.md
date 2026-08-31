@@ -23,8 +23,8 @@ that governance, in five layers.
 | 1 — CI/CD policy-as-code | Rejects a non-compliant agent manifest in the pipeline, before it reaches the API |
 | 2 — IAM least privilege | Limits who can create an agent at all, so there are fewer ways to bypass the pipeline |
 | 3 — CMEK at rest | Encrypts agent content under your key, so revoking the key makes it unreadable |
-| 4 — Real-time remediation | Catches an agent created outside the pipeline, redacts its content and soft-deletes it; alerts on a non-compliant conversation |
-| 5 — Continuous compliance | Reports the standing CMEK posture of both resource types for audit, and flags what it could not verify |
+| 4 — Real-time remediation | Catches an agent created outside the pipeline, redacts its content and soft-deletes it; for conversations, reports the create and attributes the caller |
+| 5 — Continuous compliance | Reports the standing CMEK posture for audit, and flags what it could not verify — which on the conversation surface is everything it cannot see |
 
 Layers 1 and 2 are preventive, 4 and 5 are detective, and 3 is the cryptographic
 boundary the other four exist to keep enforced.
@@ -172,8 +172,9 @@ because the platform treats them differently at every level:
 | 2 — IAM | `dataAgent*` roles | `cloudaicompanion.topics.*`, via the `gdaConversationUser` custom role |
 | 3 — CMEK at rest | key + agent | same key ring name, **paired region**; the conversation is created by your app, not the pipeline |
 | 4 — detect | `CreateDataAgent`, Admin Activity | `TopicService.CreateTopic`, Data Access (**off by default**) |
-| 4 — remediate | redact ×2, soft delete | **alert only by default** — delete is hard and irreversible |
-| 5 — report | per agent | per location, over every conversation in it |
+| 4 — verdict | re-reads the agent, rules on it | **cannot re-read** — reports the create and the caller only |
+| 4 — remediate | redact ×2, soft delete | **none possible** — the resource is invisible to the enforcer |
+| 5 — report | per agent, two reconciled sources | per location, and never "clean" — the scanner cannot enumerate conversations it did not create |
 
 `00_bootstrap.sh` already created the paired-region keys in Part 1. What is
 left is a conversation that uses one:
@@ -218,18 +219,25 @@ registered for the project and location, and stays readable while that key is
 disabled. That is why Layer 4 and Layer 5 both cover this surface rather than
 trusting the key's existence.
 
-**Layer 4 defaults to alerting, not deleting.** For an agent, remediation
-redacts twice then soft-deletes, leaving a scrubbed tombstone. A conversation
-has neither half: no updatable content field, and `DeleteConversation` is a hard
-delete with no undelete. Remediating one destroys a live user session
-irreversibly, so the enforcer alerts and leaves it alone until you say
-otherwise:
+**Layer 4 detects and attributes; it cannot verify or remediate.** This is the
+one place where the two resource types genuinely diverge, and it is a platform
+property rather than a design choice. A conversation is readable *only by the
+principal that created it* — a service account holding
+`cloudaicompanion.topics.get` gets an empty list and a 404, and
+`roles/cloudaicompanion.topicAdmin` changes nothing. So the enforcer cannot read
+a conversation's key, cannot issue a compliance verdict on one, and could not
+delete one either. What it does emit is the fact of creation, the location, and
+the caller — recorded nowhere else a compliance team would look:
 
-```bash
-( source scripts/prelude.sh
-  gcloud run services update "${FUNCTION_NAME}" --project="${PROJECT_ID}" \
-    --region="${LOCATION}" --update-env-vars=CONVERSATION_ACTION=delete )
 ```
+CONVERSATION_CREATED_CMEK_UNVERIFIABLE  caller=analyst@example.com
+  projects/P/locations/us/conversations/...  action_taken=NONE_CANNOT_READ
+```
+
+The control that actually binds on this surface is therefore **preventive**:
+Layer 1 gates the key, Layer 2 restricts who may call `CreateConversation` at
+all, and your application sets `kms_key` on every call. Layer 5 reports what it
+could not see rather than vouching for it.
 
 **One prerequisite is easy to miss.** Conversations emit no
 `geminidataanalytics` audit log at all — the create appears only as a

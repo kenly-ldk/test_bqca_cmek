@@ -237,20 +237,18 @@ def test_conversation_and_agent_resolvers_do_not_overlap():
     assert resolve_conversation_from_topic({"resourceName": FULL_NAME}) is None
 
 
-# --- the destructive-action guard -----------------------------------------
+# --- no remediation path exists ---------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "raw,expected",
-    [(None, False), ("", False), ("alert", False), ("ALERT", False),
-     ("delete", True), ("Delete", True), ("nonsense", False)],
-)
-def test_conversation_delete_is_opt_in(monkeypatch, raw, expected):
-    """DeleteConversation is a hard delete with no tombstone and no redact
-    step, so anything other than an explicit `delete` must leave the resource
-    alone."""
-    if raw is None:
-        monkeypatch.delenv("CONVERSATION_ACTION", raising=False)
-    else:
-        monkeypatch.setenv("CONVERSATION_ACTION", raw)
-    assert load_enforcer().CONVERSATION_DELETE_ENABLED is expected
+def test_enforcer_has_no_conversation_delete_path():
+    """Conversations are detect-and-attribute only, and that is structural.
+
+    The enforcer cannot read another principal's conversation (404 even with
+    roles/cloudaicompanion.topicAdmin), so it could not delete one either. A
+    delete path would silently no-op on every real conversation, which is worse
+    than not having one — it would look like a remediation control.
+    """
+    enforcer = load_enforcer()
+    assert not hasattr(enforcer, "CONVERSATION_DELETE_ENABLED")
+    assert not hasattr(enforcer, "_remediate_conversation")
+    assert hasattr(enforcer, "_handle_conversation")
