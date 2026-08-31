@@ -25,6 +25,14 @@ they feed into, live elsewhere:
 * **CAI `ExportAssets` returns DataAgents only intermittently** (1 of 7 exports
   in testing); `SearchAllResources` returned them every time. Build the
   inventory on the search API.
+* **`VAR="$(cmd 2>/dev/null)"` under `set -euo pipefail` aborts the script with
+  no output at all.** The assignment inherits the command's exit status, `-e`
+  acts on it, and the redirect has already thrown away the reason. This bit
+  `tests/run_layer5.sh` twice: `ExportAssets` allows one export at a time per
+  project and `--output-bigquery-force` recreates the destination table, so a
+  slow export leaves the follow-up query with no table to read — and an
+  informational coverage number killed the entire gate silently. Guard every
+  such assignment with `if ! VAR="$(...)"; then` and keep stderr.
 * **A disabled key hides an agent from `LIST` with no error.**
 * **`dataAgentCreator` grants `create` and nothing else** — no `get`, `list` or
   `update`. Pair it with `dataAgentViewer` or your pipeline cannot read back
@@ -62,6 +70,23 @@ they feed into, live elsewhere:
   `us-east4` always returns, but it also appears transiently elsewhere when a
   KMS key is briefly unusable — right after re-enabling a key version, for
   instance. Retry before concluding a location is broken.
+* **A freshly created log sink does not route reliably for the first few
+  minutes**, and a detection test's failure signal — "no event arrived" — looks
+  identical to a real detection bug. Measured 2026-08-31: the Layer 4
+  conversation gate run immediately after `deploy_controls.sh` saw the keyed
+  conversation's create event but not the unkeyed one; both arrived when the
+  same test ran six minutes later, and both had passed twice earlier that day
+  against a warm sink. `run_layer4_conversation.sh` now waits for the sink to
+  reach `SINK_SETTLE_SECONDS` (default 300) before creating anything.
+* **A CMEK posture probe must run before anything in the same suite revokes a
+  key.** Re-enabling a key version propagates on the same multi-minute timescale
+  as disabling one — the revocation proof measures a keyed conversation going
+  dark about four minutes after the disable. A probe that asserts "a
+  paired-region key is accepted" and runs *after* the revocation test therefore
+  sees the suite's own re-enabled key still being rejected, and reports it as
+  platform drift. `tests/run_conversations.sh` runs the probe first for exactly
+  this reason. A drift alarm straight after a revocation test is the test
+  order, not the platform.
 * **`DeleteConversation` is a *hard* delete** — unlike agents. `NotFound`
   immediately, gone from `LIST`, and the ID is reusable at once. No tombstone,
   so conversation IDs do not need to be run-scoped.

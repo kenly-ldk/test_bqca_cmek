@@ -41,11 +41,20 @@ if [[ "${EXPORT_RC}" -ne 0 ]]; then
   EXPORTED_AGENTS="n/a"
 else
   sleep 45
-  EXPORTED_AGENTS="$(bq --project_id="${PROJECT_ID}" query --use_legacy_sql=false \
+  # Guarded for the same reason the export above is, and it is the same hazard
+  # one step later: --output-bigquery-force recreates cai_snapshot, so a slower
+  # export leaves no table for this query 45s later. Under `set -euo pipefail`
+  # the bare assignment then aborts the ENTIRE Layer 5 gate, and the 2>/dev/null
+  # means it does so without printing anything at all. Coverage is an [INFO]
+  # number; failing to read it must never be fatal.
+  if ! EXPORTED_AGENTS="$(bq --project_id="${PROJECT_ID}" query --use_legacy_sql=false \
     --location="${BQ_LOCATION}" --format=csv \
     "SELECT COUNT(*) FROM ${BQ_DATASET}.cai_snapshot
-     WHERE asset_type='geminidataanalytics.googleapis.com/DataAgent'" 2>/dev/null | tail -1)"
-  EXPORTED_AGENTS="${EXPORTED_AGENTS:-n/a}"
+     WHERE asset_type='geminidataanalytics.googleapis.com/DataAgent'" 2>&1 | tail -1)"; then
+    EXPORTED_AGENTS="n/a"
+  fi
+  # A non-numeric result means the query returned an error message, not a count.
+  [[ "${EXPORTED_AGENTS}" =~ ^[0-9]+$ ]] || EXPORTED_AGENTS="n/a"
 fi
 
 # Reported, NOT asserted. ExportAssets coverage of DataAgent is unreliable — six
@@ -168,13 +177,32 @@ log "7. Conversation CMEK: the platform still behaves the way F8 records"
 #
 # --revocation is deliberately NOT passed: it disables a live KMS key version
 # for up to nine minutes. Run it by hand when re-validating F8.
-RC=0; python -m layer5.conversation_cmek_probe || RC=$?
-case "${RC}" in
-  0) check "conversation CMEK posture unchanged" 0 "paired-region key rule, opt-in CMEK and the us-east4 outage all still hold" ;;
-  2) printf '  [ERROR] conversation CMEK probe INCONCLUSIVE — could not run; re-run\n'
-     FAILED=1 ;;
-  *) check "conversation CMEK posture unchanged" 1 "platform drift — re-validate F8" ;;
-esac
+#
+# This is the ONE conversation assertion inside the agent suite, and it needs
+# Part 2's paired-region keys, which scripts/setup_conversations.sh provisions.
+# An agents-only estate does not have them, and the probe would then report the
+# resulting PERMISSION_DENIED as platform drift — a false alarm about F8 caused
+# by absent setup. Skipped rather than failed in that case; Part 2's own suite
+# (tests/run_conversations.sh) is where this assertion is mandatory.
+CONV_KEYS_PRESENT=1
+for PAIR in $(conversation_kms_pairs); do
+  gcloud kms keys describe "${KMS_KEY}" --keyring="${KMS_KEYRING}" \
+    --location="${PAIR##*:}" --project="${PROJECT_ID}" >/dev/null 2>&1 || CONV_KEYS_PRESENT=0
+done
+
+if [[ "${CONV_KEYS_PRESENT}" -eq 0 ]]; then
+  printf '  [SKIP] no paired-region conversation keys in %s — this is an\n' "${PROJECT_ID}"
+  printf '         agents-only estate. Run scripts/setup_conversations.sh and\n'
+  printf '         tests/run_conversations.sh to cover the conversation surface.\n'
+else
+  RC=0; python -m layer5.conversation_cmek_probe || RC=$?
+  case "${RC}" in
+    0) check "conversation CMEK posture unchanged" 0 "paired-region key rule, opt-in CMEK and the us-east4 outage all still hold" ;;
+    2) printf '  [ERROR] conversation CMEK probe INCONCLUSIVE — could not run; re-run\n'
+       FAILED=1 ;;
+    *) check "conversation CMEK posture unchanged" 1 "platform drift — re-validate F8" ;;
+  esac
+fi
 
 log "8. Conversation compliance (one row per project+location, over all conversations)"
 bq --project_id="${PROJECT_ID}" query --use_legacy_sql=false --location="${BQ_LOCATION}" \

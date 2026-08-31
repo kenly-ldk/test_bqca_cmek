@@ -15,7 +15,7 @@
 # property — the enforcer re-reads the resource rather than trusting the audit
 # payload — against a resource type whose payload carries no key at all.
 #
-# Prerequisites: scripts/00_bootstrap.sh (for the paired-region keys AND the
+# Prerequisites: scripts/setup_conversations.sh (for the paired-region keys AND the
 # cloudaicompanion Data Access logs, without which the sink matches nothing),
 # layer4/deploy.sh, and at least one DataAgent to anchor a conversation to.
 source "$(dirname "${BASH_SOURCE[0]}")/../scripts/prelude.sh"
@@ -47,10 +47,38 @@ print('yes' if 'cloudaicompanion.googleapis.com' in services else 'no')")"
 if [[ "${AUDIT_ON}" != "yes" ]]; then
   printf '  [ERROR] Data Access audit logs are NOT enabled for cloudaicompanion.\n'
   printf '          No conversation event will reach the enforcer, so this gate\n'
-  printf '          would pass vacuously. Run scripts/00_bootstrap.sh first.\n'
+  printf '          would pass vacuously. Run scripts/setup_conversations.sh first.\n'
   exit 2
 fi
 check "cloudaicompanion Data Access logs enabled" 0 "the sink can see conversation creates"
+
+# A freshly created log sink does not route reliably straight away, and this
+# gate's only failure signal is "no event within 300s" — indistinguishable from
+# a genuine detection bug. Measured on 2026-08-31: run ~0 min after the sink was
+# created, the keyed conversation's event arrived and the unkeyed one's never
+# did — confirmed absent from the enforcer's logs then and since, so the create
+# was genuinely lost, not merely late. The same test passed for both a few
+# minutes later. The wait is therefore not papering over a flaky assertion: it
+# keeps the gate from attributing a cold-sink loss to the enforcer, which is the
+# one thing it is supposed to be measuring. Set SINK_SETTLE_SECONDS=0 to skip.
+SINK_SETTLE_SECONDS="${SINK_SETTLE_SECONDS:-300}"
+SINK_CREATED="$(gcloud logging sinks describe "${LOG_SINK}" --project="${PROJECT_ID}" \
+  --format='value(createTime)' 2>/dev/null || true)"
+if [[ -n "${SINK_CREATED}" && "${SINK_SETTLE_SECONDS}" -gt 0 ]]; then
+  SINK_AGE="$(python -c "
+import datetime, sys
+created = datetime.datetime.fromisoformat('${SINK_CREATED}'.replace('Z', '+00:00'))
+now = datetime.datetime.now(datetime.timezone.utc)
+print(int((now - created).total_seconds()))" 2>/dev/null || echo "${SINK_SETTLE_SECONDS}")"
+  if [[ "${SINK_AGE}" -lt "${SINK_SETTLE_SECONDS}" ]]; then
+    WAIT=$(( SINK_SETTLE_SECONDS - SINK_AGE ))
+    printf '  sink %s is %ss old; waiting %ss for it to settle before creating\n' \
+      "${LOG_SINK}" "${SINK_AGE}" "${WAIT}"
+    printf '  conversations, so a routing delay cannot look like a detection failure\n'
+    sleep "${WAIT}"
+  fi
+  check "log sink settled" 0 "at least ${SINK_SETTLE_SECONDS}s old — routing is reliable"
+fi
 
 log "1. Create one keyed and one unkeyed conversation in ${CONV_LOCATION}"
 python - "${CONV_LOCATION}" "${KEYED_ID}" "${UNKEYED_ID}" <<'PYEOF'
@@ -91,7 +119,7 @@ for candidate in dict.fromkeys([location, env.get("LOCATION", location)]):
     except (GoogleAPICallError, StopIteration):
         continue
 if anchor is None:
-    sys.exit("no DataAgent to anchor a conversation to; run layer3/deploy.sh")
+    sys.exit("no DataAgent to anchor a conversation to; run scripts/deploy_agents.sh")
 
 for conversation_id, kms in ((keyed_id, key), (unkeyed_id, None)):
     conversation = geminidataanalytics.Conversation(
