@@ -37,16 +37,19 @@ Disclose the exposure window and the residual retention to risk and
 compliance. See
 [§8 Control Equivalence Matrix](docs/design.md#8-control-equivalence-matrix).
 
-**Scope: the five layers govern `DataAgent` resources.** Stateless chat creates
-no resource, so there is nothing for CMEK to hold — Layer 2 governs who may call
-it. Stateful **conversations** are a second CMEK-bearing resource type and are
-covered by this repo, but *outside* the five layers, because they obey different
-rules at every level: the key belongs in the multi-region's paired region rather
-than the location Google documents, CMEK is opt-in per conversation, and Layer 4
-can never see them. They get their own
+**Scope: the five layers are built around `DataAgent` resources.** Stateless
+chat creates no resource, so there is nothing for CMEK to hold — Layer 2 governs
+who may call it. Stateful **conversations** are a second CMEK-bearing resource
+type, and three of the layers do reach them: Layer 1 rejects them from
+manifests, Layer 2 gates who may create one, and Layer 5 reports their posture.
+Layer 4 cannot see them at all.
+
+What no layer does is provision a conversation's key, because that key is
+chosen per conversation at runtime and belongs in a different KMS location from
+the agents'. That is why conversations get their own
 [deploy step](#part-2--conversations) and
-[validation suite](#validating-conversations--a-separate-suite); Layer 1 refuses
-to provision them and Layer 5 reports their posture. The measured detail is in
+[validation suite](#validating-conversations--a-separate-suite) rather than a
+layer. The measured detail is in
 [F8](docs/validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location).
 
 ## Quick start — Deploy the solution
@@ -60,8 +63,8 @@ short form.
 
 Two parts, in order: **[Part 1 — GDA agents](#part-1--gda-agents)** stands up
 the five layers, and **[Part 2 — Conversations](#part-2--conversations)** covers
-the second resource type, which the five layers do not govern. The install block
-below serves both. Which KMS location each resource type needs is tabulated in
+the second resource type, whose key no layer provisions. The install block below
+serves both. Which KMS location each resource type needs is tabulated in
 [Where the CMEK key goes](#where-the-cmek-key-goes).
 
 Deploying needs `gcloud`, `bq` and Python: `layer3/deploy.sh` evaluates the CMEK
@@ -161,10 +164,13 @@ do not suit your estate.
 
 ### Part 2 — Conversations
 
-**Separate, not optional.** It is separate because the five layers govern
-`DataAgent` resources and the agent flow does not depend on any of it — you can
-deploy, validate and run the five layers without ever coming here. It is not
-optional because a conversation holds the same customer content an agent does,
+**Separate, not optional.** It is separate because no layer provisions this
+key, and the agent flow does not depend on any of it — you can deploy, validate
+and run all five layers without coming here. Three of them still reach
+conversations once those exist: Layer 1 rejects them from manifests, Layer 2
+gates who may create one, and Layer 5 reports their posture. Layer 4 cannot see
+them. It is not optional because a conversation holds the same customer content
+an agent does,
 in plainer form: the analyst's question, the generated SQL and the returned
 rows. Until this is done, all of it rests under Google-managed encryption, and
 no layer above changes that.

@@ -621,7 +621,7 @@ the residual retention to risk and compliance.
 
 **This covers DataAgents only.** The table above, and every number in it, is
 about agents. Conversations — the questions, the generated SQL and the returned
-rows — sit outside all of it. They *can* be CMEK-encrypted, but only with a key
+rows — sit outside those numbers. They *can* be CMEK-encrypted, but only with a key
 in the paired region and only when the caller opts in per conversation; the
 enforcer cannot see them, and Cloud Asset Inventory cannot enumerate them (F8).
 So the agent-side guarantee is "non-compliant for 13–30 s, then neutralised",

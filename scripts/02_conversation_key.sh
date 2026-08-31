@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Preflight for the CONVERSATION surface. Separate from scripts/00_bootstrap.sh
-# on purpose — the five layers govern DataAgents, and nothing below is needed to
-# deploy or validate them.
+# on purpose — no layer provisions this key, and nothing below is needed to
+# deploy or validate the five layers. (Layers 1, 2 and 5 do still cover
+# conversations once they exist: rejected from manifests, gated by IAM, and
+# reported hourly. Layer 4 cannot see them.)
 #
 # Separate is not the same as optional. A conversation holds the same customer
 # content an agent does, in plainer form: the question, the generated SQL and
