@@ -29,7 +29,7 @@ and compliance function.
 | 4 — Real-time remediation | **PASS** 7/7 | `tests/run_layer4.sh`; 13–30 s detect → redact → soft-delete across six runs |
 | 5 — Continuous compliance | **PASS** | `tests/run_layer5.sh`; two reconciled sources, proven by a live key-revocation proof |
 
-Cutting across all five, **`tests/run_unit.sh` passes 118/118** offline, with no
+Cutting across all five, **`tests/run_unit.sh` passes 113/113** offline, with no
 GCP project: the shared compliance verdict, the enforcer's audit-log parsing and
 every quadrant of the scanner's reconciliation matrix. It is not a layer — it is
 the unit suite for the logic the layers share.

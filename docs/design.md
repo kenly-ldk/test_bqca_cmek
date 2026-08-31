@@ -1057,7 +1057,7 @@ Everything below runs end-to-end in a throwaway project.
 | `layer5/conversation_cmek_probe.py` | Re-measures the conversation CMEK rules — paired-region key, opt-in CMEK, the `us-east4` outage ([F8](validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location)); exits non-zero on platform drift |
 | `common/gda_common.py` | Endpoint resolution and the single compliance verdict |
 | `tests/run_layer{1,2,3,4,5}.sh` | Per-layer gates |
-| `tests/unit/`, `tests/run_unit.sh` | Offline Python unit tests (118) — verdict, audit-log parsing, reconciliation matrix |
+| `tests/unit/`, `tests/run_unit.sh` | Offline Python unit tests (113) — verdict, audit-log parsing, reconciliation matrix |
 | `.github/workflows/cmek-policy.yml` | Reference CI pipeline: unit tests + Layer 1 policy gate |
 | `scripts/99_teardown.sh` | Deletes both projects (prompts for confirmation) |
 

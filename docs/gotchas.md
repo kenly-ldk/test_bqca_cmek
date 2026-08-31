@@ -1,4 +1,4 @@
-# Twenty things that will cost you time
+# Twenty-three things that will cost you time
 
 Practical surprises from building and validating this framework against the live
 API — the things that are obvious in hindsight and expensive in the moment. Each
@@ -65,6 +65,20 @@ they feed into, live elsewhere:
 * **`DeleteConversation` is a *hard* delete** — unlike agents. `NotFound`
   immediately, gone from `LIST`, and the ID is reusable at once. No tombstone,
   so conversation IDs do not need to be run-scoped.
+* **A conversation can only be read by whoever created it.** Not an IAM gap —
+  `roles/cloudaicompanion.topicAdmin`, which carries `topics.delete` and
+  `topics.setIamPolicy`, still gets `{}` from LIST and **404** from GET for
+  another principal's conversation. So no scanner can inventory the surface and
+  no enforcer can verify a key. Govern it before creation, not after.
+* **`logger.info` is invisible in a gen2 Cloud Function.** `functions_framework`
+  configures logging first, so your `logging.basicConfig(level=INFO)` is a no-op
+  and the root logger stays at WARNING. `logger.error` and plain `print` both
+  show up; INFO silently does not. Diagnosing "the function ran but logged
+  nothing" costs an hour.
+* **`gcloud run services delete` does not delete a gen2 function.** The function
+  resource survives, and the next deploy warns *"the service was not found,
+  redeployed with default values"* and comes back with its Eventarc trigger
+  broken — so it is never invoked again. Use `gcloud functions delete`.
 * **Conversation lifecycle logs are Data Access, under `cloudaicompanion`.**
   `CreateConversation` emits nothing under `geminidataanalytics`; it appears as
   `TopicService.CreateTopic`, in a log stream that is **off by default**, with

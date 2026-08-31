@@ -423,7 +423,7 @@ to GitLab CI, Cloud Build, Jenkins or a pre-commit hook and Layer 1 is intact.
 See [Layer 1](#layer-1--the-policy-gate).
 
 ```bash
-bash tests/run_unit.sh            # 118 unit tests
+bash tests/run_unit.sh            # 113 unit tests
 bash tests/run_layer1.sh          # policy: compile, lint, unit tests, gate
 ```
 
@@ -533,18 +533,26 @@ you can re-run yourself.
   (`run_unit.sh`, `run_layer1.sh`) have been re-run since; the live layer tests
   have not been re-executed against a deployed estate after the conversation
   work below.
-* **Conversation surface: measured 2026-08-30** in a third, purpose-created
+* **Conversation surface: measured 2026-08-30/31** in a third, purpose-created
   project — the paired-region key rule, the revocation proof with a keyless
-  control, and the `us-east4` outage. `layer5/conversation_cmek_probe.py` and
-  `scripts/repro_conversation_cmek.py` were both run end to end there.
+  control, the `us-east4` outage, and the visibility ceiling that limits what
+  Layers 4 and 5 can claim. `layer5/conversation_cmek_probe.py`,
+  `scripts/repro_conversation_cmek.py` and `layer3/deploy_conversation.sh` were
+  run end to end there.
+* **Layer 4's conversation half: deployed and verified live 2026-08-31.**
+  `tests/run_layer4_conversation.sh` passed against a real enforcer: both
+  conversations reported and attributed to the caller, neither judged
+  compliant, neither deleted. That run is what found the visibility ceiling in
+  the first place.
 
 | Test | What it verifies | Result |
 | :--- | :--- | :--- |
-| `run_unit.sh` | The shared compliance verdict, audit-log parsing for both resource types, and the reconciliation matrix — offline, no GCP project needed | 118/118 |
+| `run_unit.sh` | The shared compliance verdict, audit-log parsing for both resource types, and the reconciliation matrix — offline, no GCP project needed | 113/113 |
 | `run_layer1.sh` | Layer 1 — Regal-linted policy, 46 policy unit tests (agents and conversation keys), policy-gated deploy step | 14/14 |
 | `run_layer2.sh` | Layer 2 — 45-cell persona × operation matrix, live under impersonation, incl. conversations | 45/45 |
 | `run_layer3.sh` | Layer 3 — proven by revoking the key, not by inspecting a field | 6/6 |
 | `run_layer4.sh` | Layer 4 — ~13–30 s detect → redact → soft-delete, incl. a compliant agent that must survive | 7/7 |
+| `run_layer4_conversation.sh` | Layer 4, conversations — create reported and attributed, no compliance claimed, nothing deleted | Passing |
 | `run_layer5.sh` | Layer 5 — two reconciled sources, proven by key revocation; conversation CMEK rules re-measured | Passing |
 
 ## Where the CMEK key goes
