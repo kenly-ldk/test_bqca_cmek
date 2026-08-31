@@ -52,7 +52,7 @@ cp "${HERE}/scanner/Procfile" "${BUILD_DIR}/"
 log "Deploying Cloud Run job ${SCANNER_JOB}"
 gcloud run jobs deploy "${SCANNER_JOB}" \
   --project="${PROJECT_ID}" \
-  --region="${LOCATION}" \
+  --region="${INFRA_REGION}" \
   --source="${BUILD_DIR}" \
   --service-account="${SA_EMAIL}" \
   `# ^@^ switches the delimiter: SCAN_LOCATIONS and APPROVED_KMS_PROJECTS are` \
@@ -64,14 +64,14 @@ gcloud run jobs deploy "${SCANNER_JOB}" \
 
 log "Cloud Scheduler ${SCANNER_JOB}-schedule (${SCANNER_SCHEDULE})"
 SCHED_ARGS=(
-  --project="${PROJECT_ID}" --location="${LOCATION}"
+  --project="${PROJECT_ID}" --location="${INFRA_REGION}"
   --schedule="${SCANNER_SCHEDULE}" --time-zone=Etc/UTC
-  --uri="https://${LOCATION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${SCANNER_JOB}:run"
+  --uri="https://${INFRA_REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${SCANNER_JOB}:run"
   --http-method=POST
   --oauth-service-account-email="${SA_EMAIL}"
 )
 if gcloud scheduler jobs describe "${SCANNER_JOB}-schedule" \
-     --project="${PROJECT_ID}" --location="${LOCATION}" >/dev/null 2>&1; then
+     --project="${PROJECT_ID}" --location="${INFRA_REGION}" >/dev/null 2>&1; then
   gcloud scheduler jobs update http "${SCANNER_JOB}-schedule" "${SCHED_ARGS[@]}" --quiet >/dev/null
   echo "  updated"
 else
@@ -82,7 +82,7 @@ fi
 # The scheduler calls the Run Admin API as the scanner SA, so it needs to be
 # able to invoke its own job.
 gcloud run jobs add-iam-policy-binding "${SCANNER_JOB}" \
-  --project="${PROJECT_ID}" --region="${LOCATION}" \
+  --project="${PROJECT_ID}" --region="${INFRA_REGION}" \
   --member="serviceAccount:${SA_EMAIL}" --role=roles/run.invoker --quiet >/dev/null
 echo "  scanner SA can invoke the job"
 

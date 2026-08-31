@@ -24,7 +24,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/../scripts/prelude.sh"
 
 if [[ "${ALLOW_ENFORCING_LAYER4:-0}" != "1" ]]; then
   ENFORCER_DRY_RUN="$(gcloud functions describe "${FUNCTION_NAME}" \
-    --project="${PROJECT_ID}" --region="${LOCATION}" \
+    --project="${PROJECT_ID}" --region="${INFRA_REGION}" \
     --format='value(serviceConfig.environmentVariables.DRY_RUN)' 2>/dev/null || true)"
   if [[ -z "${ENFORCER_DRY_RUN}" ]]; then
     echo "  [OK] Layer 4 enforcer not deployed — no race."
@@ -37,7 +37,7 @@ ERROR: the Layer 4 enforcer (${FUNCTION_NAME}) is in ENFORCING mode
 mid-run. Switch it to dry-run first:
 
   gcloud run services update ${FUNCTION_NAME} --project=${PROJECT_ID} \\
-    --region=${LOCATION} --update-env-vars=DRY_RUN=true
+    --region=${INFRA_REGION} --update-env-vars=DRY_RUN=true
 
 ...then switch it back with DRY_RUN=false before running tests/run_layer4.sh.
 Override with ALLOW_ENFORCING_LAYER4=1 to accept the race.

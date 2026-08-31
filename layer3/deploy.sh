@@ -22,8 +22,8 @@
 source "$(dirname "${BASH_SOURCE[0]}")/../scripts/prelude.sh"
 cd "${REPO_ROOT}"
 
-log "BigQuery datasource ${BQ_SOURCE_DATASET}.${BQ_SOURCE_TABLE} in ${LOCATION}"
-bq --project_id="${PROJECT_ID}" mk --location="${LOCATION}" \
+log "BigQuery datasource ${BQ_SOURCE_DATASET}.${BQ_SOURCE_TABLE} in ${AGENT_LOCATION}"
+bq --project_id="${PROJECT_ID}" mk --location="${AGENT_LOCATION}" \
   --dataset "${PROJECT_ID}:${BQ_SOURCE_DATASET}" 2>/dev/null || echo "  dataset exists"
 
 # A pre-existing dataset of the same name in a DIFFERENT location is the one
@@ -35,15 +35,15 @@ DATASET_LOCATION="$(bq --project_id="${PROJECT_ID}" --format=json show \
   "${PROJECT_ID}:${BQ_SOURCE_DATASET}" 2>/dev/null \
   | python -c 'import json,sys; print(json.load(sys.stdin).get("location",""))' 2>/dev/null || true)"
 if [[ -n "${DATASET_LOCATION}" ]] &&
-   [[ "${DATASET_LOCATION,,}" != "${LOCATION,,}" ]]; then
+   [[ "${DATASET_LOCATION,,}" != "${AGENT_LOCATION,,}" ]]; then
   cat >&2 <<EOF
 
   Dataset ${PROJECT_ID}:${BQ_SOURCE_DATASET} is in ${DATASET_LOCATION}, but
-  LOCATION is ${LOCATION}. BigQuery cannot run a job against a dataset outside
+  AGENT_LOCATION is ${AGENT_LOCATION}. BigQuery cannot run a job against a dataset outside
   the job's location, so the table below cannot be created.
 
   A dataset's location is fixed at creation. Either drop and recreate it in
-  ${LOCATION}, or point BQ_SOURCE_DATASET at a different name in
+  ${AGENT_LOCATION}, or point BQ_SOURCE_DATASET at a different name in
   config/shared.env.local.
 EOF
   exit 1
@@ -52,7 +52,7 @@ fi
 # Captured rather than sent to /dev/null: bq reports query errors on STDOUT, so
 # discarding it turns any failure into a bare non-zero exit with no diagnosis.
 # The success output is noise, so it is only printed when something went wrong.
-BQ_OUT="$(bq --project_id="${PROJECT_ID}" query --use_legacy_sql=false --location="${LOCATION}" \
+BQ_OUT="$(bq --project_id="${PROJECT_ID}" query --use_legacy_sql=false --location="${AGENT_LOCATION}" \
 "CREATE TABLE IF NOT EXISTS ${BQ_SOURCE_DATASET}.${BQ_SOURCE_TABLE} AS
  SELECT * FROM UNNEST([
    STRUCT(1 AS customer_id, 'Alice Tan' AS full_name, 'Singapore' AS city, 125000.50 AS balance_sgd, DATE '2021-03-14' AS joined_date),

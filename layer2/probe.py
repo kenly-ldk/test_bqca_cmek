@@ -297,7 +297,7 @@ def main() -> int:
     args = parser.parse_args()
 
     env = load()
-    project, location = env["PROJECT_ID"], env["LOCATION"]
+    project, location = env["PROJECT_ID"], env["AGENT_LOCATION"]
     fixture = args.fixture or "pipeline-wealth-agent"
 
     if args.matrix:

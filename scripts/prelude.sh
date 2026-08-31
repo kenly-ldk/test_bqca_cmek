@@ -33,8 +33,18 @@ export APPROVED_KMS_PROJECTS="${APPROVED_KMS_PROJECTS:-${PROJECT_ID}}"
 
 # Fully-qualified key paths, derived so no script hardcodes them. Distinct names
 # from KMS_KEY/ROGUE_KMS_KEY so re-sourcing this file stays idempotent.
-export APPROVED_KMS_KEY_PATH="projects/${PROJECT_ID}/locations/${LOCATION}/keyRings/${KMS_KEYRING}/cryptoKeys/${KMS_KEY}"
-export ROGUE_KMS_KEY_PATH="projects/${ROGUE_PROJECT_ID}/locations/${LOCATION}/keyRings/${ROGUE_KMS_KEYRING}/cryptoKeys/${ROGUE_KMS_KEY}"
+export APPROVED_KMS_KEY_PATH="projects/${PROJECT_ID}/locations/${AGENT_LOCATION}/keyRings/${KMS_KEYRING}/cryptoKeys/${KMS_KEY}"
+export ROGUE_KMS_KEY_PATH="projects/${ROGUE_PROJECT_ID}/locations/${AGENT_LOCATION}/keyRings/${ROGUE_KMS_KEYRING}/cryptoKeys/${ROGUE_KMS_KEY}"
+
+# A GDA multi-region is not a deployable region. Catching it here beats a
+# gcloud error 400 six minutes into a Cloud Run build.
+case "${INFRA_REGION}" in
+  us|eu|global)
+    echo "INFRA_REGION='${INFRA_REGION}' is a GDA multi-region, not a Cloud Run" >&2
+    echo "region. Layers 4 and 5 cannot deploy there. Use a real region such as" >&2
+    echo "us-central1 or us-east4, and set AGENT_LOCATION separately." >&2
+    return 1 2>/dev/null || exit 1 ;;
+esac
 
 # The two Google-managed service agents (P4SAs) that CMEK requires on the key.
 # Their addresses derive from PROJECT_NUMBER, so nothing here is project-specific
@@ -65,14 +75,25 @@ export -f grant_cmek_key
 # The `us` -> `us-central1`, `eu` -> `europe-west1` map that conversations need,
 # read from common/gda_common.py so the shell cannot drift from the policy, the
 # enforcer and the probe. Prints "<conversation location>:<kms location>" pairs.
+# Honours CONVERSATION_LOCATIONS, which SELECTS from the map rather than
+# replacing it: the map is the platform rule (measured, not configurable), the
+# config picks which of its entries this estate actually deploys into. An
+# unsupported name is rejected here rather than burning a one-shot key slot.
 conversation_kms_pairs() {
   python -c 'import sys; sys.path.insert(0, "'"${REPO_ROOT}"'")
 from common.gda_common import CONVERSATION_KMS_LOCATION as m
-print(" ".join(f"{k}:{v}" for k, v in sorted(m.items())))'
+want = [s.strip() for s in "'"${CONVERSATION_LOCATIONS:-}"'".split(",") if s.strip()]
+if not want:
+    want = sorted(m)
+bad = [w for w in want if w not in m]
+if bad:
+    sys.exit(f"CONVERSATION_LOCATIONS contains {bad}; a conversation can only be "
+             f"created in {sorted(m)}")
+print(" ".join(f"{k}:{m[k]}" for k in sorted(set(want))))'
 }
 export -f conversation_kms_pairs
 
-# Endpoint that serves ${LOCATION}. Keep in sync with common/gda_common.py.
+# Endpoint that serves a GDA location. Keep in sync with common/gda_common.py.
 gda_endpoint() {
   local loc="$1"
   case "$loc" in

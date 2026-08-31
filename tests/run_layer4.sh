@@ -36,9 +36,9 @@ declare -A AGENT_ID=(
   [global-nokey]="agent-global-nokey-${RUN_ID}"
 )
 declare -A AGENT_LOC=(
-  [compliant]="${LOCATION}"
-  [nokey]="${LOCATION}"
-  [rogue]="${LOCATION}"
+  [compliant]="${AGENT_LOCATION}"
+  [nokey]="${AGENT_LOCATION}"
+  [rogue]="${AGENT_LOCATION}"
   [global-nokey]=global
 )
 

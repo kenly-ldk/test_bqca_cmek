@@ -2,8 +2,8 @@
   "agents": [
     {
       "id": "pipeline-wealth-agent",
-      "location": "${LOCATION}",
-      "kms_key": "projects/${PROJECT_ID}/locations/${LOCATION}/keyRings/${KMS_KEYRING}/cryptoKeys/${KMS_KEY}",
+      "location": "${AGENT_LOCATION}",
+      "kms_key": "projects/${PROJECT_ID}/locations/${AGENT_LOCATION}/keyRings/${KMS_KEYRING}/cryptoKeys/${KMS_KEY}",
       "display_name": "Wealth Management Analytics Agent",
       "description": "Deployed via the Layer 1 policy-gated pipeline.",
       "system_instruction": "You are the Cymbal Bank wealth analytics assistant. Answer questions about customers using the customers table. Be concise and prefer a single SQL query.",

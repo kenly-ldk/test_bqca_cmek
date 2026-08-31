@@ -109,7 +109,7 @@ chat = geminidataanalytics.DataChatServiceClient(
     client_options=ClientOptions(api_endpoint=api_endpoint(location)))
 
 anchor = None
-for candidate in dict.fromkeys([location, env.get("LOCATION", location)]):
+for candidate in dict.fromkeys([location, env.get("AGENT_LOCATION", location)]):
     try:
         client = geminidataanalytics.DataAgentServiceClient(
             client_options=ClientOptions(api_endpoint=api_endpoint(candidate)))

@@ -103,7 +103,7 @@ def _poll_until(client, name: str, want_readable: bool) -> tuple[bool, str]:
 
 def main() -> int:
     env = load()
-    project, location = env["PROJECT_ID"], env["LOCATION"]
+    project, location = env["PROJECT_ID"], env["AGENT_LOCATION"]
     key_path = (
         f"projects/{project}/locations/{location}"
         f"/keyRings/{env['KMS_KEYRING']}/cryptoKeys/{env['KMS_KEY']}"

@@ -8,7 +8,7 @@
 # live in the two setup scripts that follow, because the two need their CMEK
 # keys in DIFFERENT KMS locations and only one of them needs Data Access logs:
 #
-#   scripts/setup_agents.sh          the agents' key, in ${LOCATION}
+#   scripts/setup_agents.sh          the agents' key, in ${AGENT_LOCATION}
 #   scripts/setup_conversations.sh   the paired-region keys + the audit logs
 #
 # Everything here is something a real deployment needs, so this script is safe
@@ -42,7 +42,7 @@ echo "  ${AIC_SERVICE_AGENT}"
 
 # constraints/iam.automaticIamGrantsForDefaultServiceAccounts is enforced in
 # many organizations, so the default compute SA (which Cloud Build uses for
-# gen2 function and Cloud Run job builds) can start with no roles, and every
+# Cloud Run function and Cloud Run job builds) can start with no roles, and every
 # Layer 4 / Layer 5 build then fails with "missing permission on the build
 # service account".
 log "Granting build roles to the default compute SA"
@@ -60,7 +60,7 @@ cat <<EOF
 No CMEK key exists yet — each resource type needs its own, in its own KMS
 location. Set up whichever you are governing:
 
-  bash scripts/setup_agents.sh          # Part 1 — the key in ${LOCATION}
+  bash scripts/setup_agents.sh          # Part 1 — the key in ${AGENT_LOCATION}
   bash scripts/setup_conversations.sh   # Part 2 — the paired-region keys
 
 Then the shared control plane, and the resource itself:

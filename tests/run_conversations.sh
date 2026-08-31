@@ -71,7 +71,7 @@ done
 echo "  paired-region keys present for: $(conversation_kms_pairs)"
 
 if ! gcloud run services describe "${FUNCTION_NAME}" --project="${PROJECT_ID}" \
-     --region="${LOCATION}" >/dev/null 2>&1; then
+     --region="${INFRA_REGION}" >/dev/null 2>&1; then
   echo "  Layer 4 enforcer ${FUNCTION_NAME} is not deployed — its gate below" >&2
   echo "  would pass vacuously.  Run:  bash scripts/deploy_controls.sh" >&2
   exit 1

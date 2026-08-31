@@ -398,6 +398,6 @@ def process_audit_log(cloud_event) -> None:
     _remediate(agent, verdict, caller, detected_at)
 
 
-# Kept for naming parity with the documented architecture; unused by the gen2
-# entry point.
+# Kept for naming parity with the documented architecture; unused by the
+# Cloud Run functions entry point.
 __all__ = ["process_audit_log", "MISSING_CMEK"]

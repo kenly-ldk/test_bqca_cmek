@@ -101,12 +101,32 @@ def _set_key_enabled(key_path: str, enabled: bool) -> None:
     print(f"  key version {'ENABLED' if enabled else 'DISABLED'}")
 
 
-def _run_scanner(project: str, location: str, job: str) -> None:
-    subprocess.run(
+def _run_scanner(project: str, infra_region: str, job: str) -> None:
+    """Run the scanner job and REPORT a failure rather than swallowing it.
+
+    The region here is INFRA_REGION -- where the Cloud Run job is deployed --
+    not the agent's GDA location. They are different variables precisely
+    because a GDA multi-region such as `us` is not a deployable Cloud Run
+    region, and passing one here fails the execute.
+
+    check=False with the output captured used to hide that completely: the job
+    never ran, the inventory kept the PREVIOUS scan's rows, and the caller then
+    compared against stale verdicts and reported agents COMPLIANT that it had
+    just hidden. A failure to re-scan must be loud, because every assertion
+    downstream assumes the scan happened.
+    """
+    result = subprocess.run(
         ["gcloud", "run", "jobs", "execute", job,
-         f"--project={project}", f"--region={location}", "--wait"],
+         f"--project={project}", f"--region={infra_region}", "--wait"],
         capture_output=True, text=True, check=False,
     )
+    if result.returncode != 0:
+        tail = (result.stderr or result.stdout or "").strip().splitlines()
+        raise RuntimeError(
+            f"scanner job '{job}' did not run in region '{infra_region}' "
+            f"(exit {result.returncode}): {tail[-1] if tail else 'no output'}. "
+            "Every verdict below would have been read from the previous scan."
+        )
 
 
 def _view_statuses(project: str, dataset: str, view: str) -> dict[str, str]:
@@ -119,7 +139,14 @@ def _view_statuses(project: str, dataset: str, view: str) -> dict[str, str]:
 
 def main() -> int:
     env = load()
-    project, location = env["PROJECT_ID"], env["LOCATION"]
+    # Two different things, and conflating them is what this file used to do:
+    # `location` is the GDA location whose agents are listed and whose CMEK key
+    # is disabled; `infra_region` is the Cloud Run region the scanner job lives
+    # in. With AGENT_LOCATION=us the first is a multi-region and the second
+    # cannot be.
+    project = env["PROJECT_ID"]
+    location = env["AGENT_LOCATION"]
+    infra_region = env["INFRA_REGION"]
     key_path = (
         f"projects/{project}/locations/{location}"
         f"/keyRings/{env['KMS_KEYRING']}/cryptoKeys/{env['KMS_KEY']}"
@@ -155,7 +182,7 @@ def main() -> int:
             return EXIT_INCONCLUSIVE
 
         print("  running the scanner while the key is disabled...")
-        _run_scanner(project, location, env["SCANNER_JOB"])
+        _run_scanner(project, infra_region, env["SCANNER_JOB"])
         statuses = _view_statuses(project, env["BQ_DATASET"], env["COMPLIANCE_VIEW"])
 
         missing = sorted(a for a in still_in_cai if a not in statuses)
@@ -203,7 +230,7 @@ def main() -> int:
                     break
             except GoogleAPICallError:
                 continue
-        _run_scanner(project, location, env["SCANNER_JOB"])
+        _run_scanner(project, infra_region, env["SCANNER_JOB"])
         print("  inventory rescanned with the key enabled")
 
 

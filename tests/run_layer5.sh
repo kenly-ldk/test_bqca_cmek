@@ -110,7 +110,7 @@ fi
 
 log "3. Scanner run"
 gcloud run jobs execute "${SCANNER_JOB}" --project="${PROJECT_ID}" \
-  --region="${LOCATION}" --wait >/dev/null 2>&1
+  --region="${INFRA_REGION}" --wait >/dev/null 2>&1
 sleep 10
 
 log "4. Compliance view"

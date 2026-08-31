@@ -107,7 +107,7 @@ def create(location: str, conversation_id: str) -> str | None:
         return None
     print(f"  policy OK: {kms_key}")
 
-    agent = find_anchor_agent(project, location, env.get("LOCATION", location))
+    agent = find_anchor_agent(project, location, env.get("AGENT_LOCATION", location))
     if agent is None:
         print(f"[SKIPPED] no DataAgent to anchor a conversation to. "
               f"Run scripts/deploy_agents.sh first.")

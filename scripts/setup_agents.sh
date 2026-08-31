@@ -3,7 +3,7 @@
 # Idempotent; safe to re-run.
 #
 # A DataAgent takes a key in ITS OWN location, so this creates one key ring and
-# key in ${LOCATION} and grants both service agents encrypter/decrypter on it.
+# key in ${AGENT_LOCATION} and grants both service agents encrypter/decrypter on it.
 # That is the whole of the agent-specific preflight. Conversations do not use
 # this key — theirs must live in the multi-region's paired primary region, which
 # is a different KMS location entirely (see scripts/setup_conversations.sh and
@@ -24,8 +24,8 @@ for ARG in "$@"; do
   esac
 done
 
-log "Cloud KMS key for the agent surface, in ${LOCATION}"
-grant_cmek_key "${LOCATION}"
+log "Cloud KMS key for the agent surface, in ${AGENT_LOCATION}"
+grant_cmek_key "${AGENT_LOCATION}"
 echo "  ${APPROVED_KMS_KEY_PATH}"
 echo "  both service agents hold roles/cloudkms.cryptoKeyEncrypterDecrypter"
 
@@ -75,15 +75,15 @@ log "Enabling Cloud KMS on ${ROGUE_PROJECT_ID}"
 gcloud services enable cloudkms.googleapis.com --project="${ROGUE_PROJECT_ID}"
 
 log "Unapproved KMS key in ${ROGUE_PROJECT_ID}"
-gcloud kms keyrings create "${ROGUE_KMS_KEYRING}" --location="${LOCATION}" \
+gcloud kms keyrings create "${ROGUE_KMS_KEYRING}" --location="${AGENT_LOCATION}" \
   --project="${ROGUE_PROJECT_ID}" 2>/dev/null || echo "  rogue keyring exists"
-gcloud kms keys create "${ROGUE_KMS_KEY}" --keyring="${ROGUE_KMS_KEYRING}" --location="${LOCATION}" \
+gcloud kms keys create "${ROGUE_KMS_KEY}" --keyring="${ROGUE_KMS_KEYRING}" --location="${AGENT_LOCATION}" \
   --purpose=encryption --project="${ROGUE_PROJECT_ID}" 2>/dev/null || echo "  rogue key exists"
 
 log "Granting cryptoKeyEncrypterDecrypter on the UNAPPROVED key"
 for MEMBER in "${GDA_SERVICE_AGENT}" "${AIC_SERVICE_AGENT}"; do
   gcloud kms keys add-iam-policy-binding "${ROGUE_KMS_KEY}" \
-    --keyring="${ROGUE_KMS_KEYRING}" --location="${LOCATION}" --project="${ROGUE_PROJECT_ID}" \
+    --keyring="${ROGUE_KMS_KEYRING}" --location="${AGENT_LOCATION}" --project="${ROGUE_PROJECT_ID}" \
     --member="${MEMBER}" --role=roles/cloudkms.cryptoKeyEncrypterDecrypter --quiet >/dev/null
   echo "  ${MEMBER}"
 done

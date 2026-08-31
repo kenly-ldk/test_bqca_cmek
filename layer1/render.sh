@@ -10,7 +10,7 @@ render() {  # $1=template  $2=output
   # Only the vars we own — plain envsubst would eat any other $... in the text.
   sed -e "s|\${PROJECT_ID}|${PROJECT_ID}|g" \
       -e "s|\${ROGUE_PROJECT_ID}|${ROGUE_PROJECT_ID}|g" \
-      -e "s|\${LOCATION}|${LOCATION}|g" \
+      -e "s|\${AGENT_LOCATION}|${AGENT_LOCATION}|g" \
       -e "s|\${KMS_KEYRING}|${KMS_KEYRING}|g" \
       -e "s|\${KMS_KEY}|${KMS_KEY}|g" \
       -e "s|\${ROGUE_KMS_KEYRING}|${ROGUE_KMS_KEYRING}|g" \

@@ -128,7 +128,7 @@ log "Deploying ${FUNCTION_NAME}"
 gcloud functions deploy "${FUNCTION_NAME}" \
   --project="${PROJECT_ID}" \
   --gen2 \
-  --region="${LOCATION}" \
+  --region="${INFRA_REGION}" \
   --runtime=python312 \
   --source="${BUILD_DIR}" \
   --entry-point=process_audit_log \
@@ -148,7 +148,7 @@ gcloud functions deploy "${FUNCTION_NAME}" \
 # service exists.
 log "Granting run.invoker to the push identity"
 gcloud run services add-iam-policy-binding "${FUNCTION_NAME}" \
-  --project="${PROJECT_ID}" --region="${LOCATION}" \
+  --project="${PROJECT_ID}" --region="${INFRA_REGION}" \
   --member="serviceAccount:${SA_EMAIL}" --role=roles/run.invoker --quiet >/dev/null
 echo "  granted roles/run.invoker on ${FUNCTION_NAME}"
 

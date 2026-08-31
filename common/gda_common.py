@@ -13,7 +13,7 @@ Single source of truth for the two things every layer must agree on:
      (periodic reporting) must never disagree about a resource, so both call
      ``evaluate_compliance``.
 
-This module is deployed alongside the Cloud Function and the scanner job by
+This module is deployed alongside the Cloud Run function and the scanner job by
 their respective deploy scripts, so it must not import anything outside the
 standard library plus google-cloud-geminidataanalytics.
 """

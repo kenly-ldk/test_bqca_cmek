@@ -51,7 +51,7 @@ run_gate() {  # $1=label $2=script
 
 set_dry_run() {  # $1=true|false
   gcloud run services update "${FUNCTION_NAME}" --project="${PROJECT_ID}" \
-    --region="${LOCATION}" --update-env-vars="DRY_RUN=$1" >/dev/null
+    --region="${INFRA_REGION}" --update-env-vars="DRY_RUN=$1" >/dev/null
   echo "  Layer 4 DRY_RUN=$1"
 }
 
@@ -80,7 +80,7 @@ fi
 echo "  datasource ${BQ_SOURCE_DATASET}.${BQ_SOURCE_TABLE} present"
 
 if ! gcloud kms keys describe "${ROGUE_KMS_KEY}" --keyring="${ROGUE_KMS_KEYRING}" \
-     --location="${LOCATION}" --project="${ROGUE_PROJECT_ID}" >/dev/null 2>&1; then
+     --location="${AGENT_LOCATION}" --project="${ROGUE_PROJECT_ID}" >/dev/null 2>&1; then
   echo "  No unapproved key in ${ROGUE_PROJECT_ID}. The negative tests need it." >&2
   echo "  Run:  bash scripts/setup_agents.sh --with-fixtures" >&2
   exit 1
@@ -88,7 +88,7 @@ fi
 echo "  unapproved key present in ${ROGUE_PROJECT_ID}"
 
 if ! gcloud run services describe "${FUNCTION_NAME}" --project="${PROJECT_ID}" \
-     --region="${LOCATION}" >/dev/null 2>&1; then
+     --region="${INFRA_REGION}" >/dev/null 2>&1; then
   echo "  Layer 4 enforcer ${FUNCTION_NAME} is not deployed." >&2
   echo "  Run:  bash scripts/deploy_controls.sh" >&2
   exit 1

@@ -81,7 +81,7 @@ def agent_id_for(variant: str, run_id: str | None) -> str:
 
 
 def _derived_key_paths(env: dict[str, str]) -> dict[str, str]:
-    location = env["LOCATION"]
+    location = env["AGENT_LOCATION"]
     return {
         "APPROVED_KMS_KEY_PATH": (
             f"projects/{env['PROJECT_ID']}/locations/{location}"
@@ -101,7 +101,7 @@ def create(variant: str, run_id: str | None = None) -> str | None:
     _, location_override, key_fn = VARIANTS[variant]
     agent_id = agent_id_for(variant, run_id)
     project = env["PROJECT_ID"]
-    location = location_override or env["LOCATION"]
+    location = location_override or env["AGENT_LOCATION"]
     kms_key = key_fn(env)
 
     agent = geminidataanalytics.DataAgent(

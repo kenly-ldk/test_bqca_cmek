@@ -29,7 +29,7 @@ done
 
 log "Checking prerequisites"
 if ! gcloud kms keys describe "${KMS_KEY}" --keyring="${KMS_KEYRING}" \
-     --location="${LOCATION}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+     --location="${AGENT_LOCATION}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
   echo "No CMEK key at ${APPROVED_KMS_KEY_PATH}." >&2
   echo "Run:  bash scripts/setup_agents.sh" >&2
   exit 1
@@ -40,7 +40,7 @@ echo "  agent key present: ${APPROVED_KMS_KEY_PATH}"
 # just do not get to watch Layer 4 rule on the agent, which is the point of
 # deploying in this order.
 if gcloud run services describe "${FUNCTION_NAME}" --project="${PROJECT_ID}" \
-     --region="${LOCATION}" >/dev/null 2>&1; then
+     --region="${INFRA_REGION}" >/dev/null 2>&1; then
   echo "  Layer 4 enforcer deployed — it will classify the new agent"
 else
   echo "  [WARN] Layer 4 is not deployed. The agent will be created, but no"
@@ -69,6 +69,6 @@ fi
 
 log "Switching Layer 4 out of dry run"
 gcloud run services update "${FUNCTION_NAME}" --project="${PROJECT_ID}" \
-  --region="${LOCATION}" --update-env-vars=DRY_RUN=false >/dev/null
+  --region="${INFRA_REGION}" --update-env-vars=DRY_RUN=false >/dev/null
 echo "  ${FUNCTION_NAME} is now ENFORCING — it will redact and soft-delete"
 echo "  any agent it classifies non-compliant"
