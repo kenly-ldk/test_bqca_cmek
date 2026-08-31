@@ -44,23 +44,20 @@ at all, so there is nothing for CMEK to hold — Layer 2 governs who may call it
 and that is the whole of it.
 
 The mechanics differ between the two — different key locations, a different
-audit service, a different remediation story — so conversations get their own
+audit service, a different remediation story — so `Conversation` get its own
 [deploy step](#part-2--conversations) and
-[validation suite](#validating-conversations--a-separate-suite) rather than
-being folded into the agent flow.
+[validation suite](#reproduce-the-conversation-tests) rather than
+being folded into the `DataAgent` flow.
 
-## Quick start — Deploy the solution
+## Getting started
 
-Stands up a **working demo**: the controls, plus a real CMEK-protected agent
-created only after the Layer 1 policy passes its manifest.
-[Reproduce the validation tests](#reproduce-the-validation-tests) then runs
-against this deployment rather than building its own.
+Stands up a **working demo** of both resource types. The two parts below are
+self-contained and run in order: **[Part 1 — GDA agents](#part-1--gda-agents)**
+then **[Part 2 — Conversations](#part-2--conversations)**. Each covers its own
+deploy, how it works, how to reproduce the tests, and the results. Everything in
+this section serves both.
 
-Two parts, in order: **[Part 1 — GDA agents](#part-1--gda-agents)** stands up
-the five layers, and **[Part 2 — Conversations](#part-2--conversations)** applies
-the same five to the second resource type. The install block below serves both,
-and `00_bootstrap.sh` in Part 1 provisions the keys for both. Which KMS location
-each resource type needs is tabulated in
+Which KMS location each resource type needs is tabulated in
 [Where the CMEK key goes](#where-the-cmek-key-goes).
 
 Deploying needs `gcloud`, `bq` and Python: `layer3/deploy.sh` evaluates the CMEK
@@ -107,9 +104,13 @@ curl -sL -o ~/.local/bin/regal https://github.com/StyraInc/regal/releases/downlo
 chmod +x ~/.local/bin/opa ~/.local/bin/regal
 ```
 
-### Part 1 — GDA agents
+## Part 1 — GDA agents
 
-**Deploy.** Configure the estate, then bring the layers up in dependency order.
+The five layers, standing up `DataAgent` governance end to end.
+
+### Deploy
+
+Configure the estate, then bring the layers up in dependency order.
 Each step says which layer it is standing up:
 
 ```bash
@@ -158,20 +159,262 @@ Everything else — `LOCATION`, `KMS_KEYRING`/`KMS_KEY`, `BQ_DATASET`,
 `config/shared.env`. Override any of them in `shared.env.local` if the defaults
 do not suit your estate.
 
-### Part 2 — Conversations
+### How it works
 
-**Separate script, same five layers.** Conversations are a second CMEK-bearing
-resource type. Each layer covers them, through different mechanics:
+The commands above stand up all five layers. Taken in layer order rather than
+run order, this is what each one does.
 
-| Layer | Agents | Conversations |
+#### Layer 1 — the policy gate
+
+Layer 1 has no deploy step because it is code, not infrastructure. It runs in
+two places:
+
+* **Locally**, inside `layer3/deploy.sh`, which calls `layer1/render.sh` and
+  then `layer1/apply_manifest.py`. The policy is evaluated in-process and the
+  API is never called at all if the manifest violates it.
+* **In CI**, where `.github/workflows/cmek-policy.yml` runs the same policy on
+  every pull request. Its `policy` and `unit` jobs need no configuration, so a
+  fork goes green on the first push.
+
+**The control is the rule, not the runner.** The goal is that no manifest
+violating the CMEK policy ever reaches the API; GitHub Actions is only how this
+repo demonstrates it. Two portable pieces carry it to any other system:
+`opa eval` against `layer1/policy.rego` for the pre-merge check, and
+`python -m layer1.apply_manifest` for the apply step. The second re-evaluates
+the same rules in-process, so the gate still holds if the CI check is skipped or
+misconfigured — wire those into GitLab CI, Cloud Build, Jenkins or a pre-commit
+hook and Layer 1 is intact.
+
+That workflow also has an optional `deploy` job which applies manifests on push
+to `main`. Enable it with four GitHub repository variables — `WIF_PROVIDER`,
+`DEPLOY_SERVICE_ACCOUNT`, `PROJECT_ID` and `APPROVED_KMS_PROJECTS`. Without them
+it skips cleanly rather than failing, so the workflow is useful with or without
+a GCP connection.
+
+#### Layer 2 — the personas
+
+`layer2/deploy.sh` creates five service accounts and a `gdaConversationUser`
+custom role, which exists because no predefined role can create a conversation
+at least privilege. The behavioural probe then impersonates each persona in turn
+and records what it actually can and cannot do.
+
+Those five are *throwaway* identities (`layer2-analyst`, `layer2-no-access`, …)
+built for the probe. Right for a demo estate, wrong for a production one — see
+[Adapting this to your own estate](#adapting-this-to-your-own-estate).
+
+#### Layer 3 — how the agent gets its key
+
+`00_bootstrap.sh` creates the key and grants it to the two service agents that
+need it. Those are **Google-managed** —
+`service-<PROJECT_NUMBER>@gcp-sa-geminidataanalytics.iam.gserviceaccount.com`
+and `...@gcp-sa-cloudaicompanion.iam.gserviceaccount.com`. They are derived from
+your `PROJECT_NUMBER`, so nothing is hardcoded to any one project, but you
+cannot substitute a service account of your own: CMEK requires the grant on
+those exact identities.
+
+`layer3/deploy.sh` then creates an agent that uses the key. Between those two
+steps, Layer 3 is simply a rule about how agents get created: every agent
+carries a `kms_key` in an approved project, in a location that supports CMEK
+(`us-east4`, `us`, `eu` — never `global`). The script renders
+`layer1/manifests/agents.json` from the committed template, runs it through the
+CMEK policy, and only then calls the API — so it exercises Layers 1 and 3
+together. In code, the part that matters:
+
+```python
+agent = geminidataanalytics.DataAgent(
+    display_name="Wealth Management Analytics Agent",
+    data_analytics_agent=geminidataanalytics.DataAnalyticsAgent(
+        published_context=published_context,
+    ),
+)
+agent.kms_key = (
+    f"projects/{kms_project}/locations/us-east4"
+    f"/keyRings/gda-kr/cryptoKeys/agent-key"
+)
+
+client.create_data_agent_sync(       # target this location's own endpoint,
+                                     # never the global one
+    request=geminidataanalytics.CreateDataAgentRequest(
+        parent=f"projects/{project}/locations/us-east4",
+        data_agent_id="wealth-management-agent",
+        data_agent=agent,
+    )
+)
+```
+
+**The key can only be set at creation** — it cannot be added or changed
+afterwards, which is exactly what makes Layer 4's read-back check trustworthy.
+Endpoint selection is covered in
+[§4.1](docs/design.md#41-supported-locations-and-endpoints--mandatory).
+
+**CMEK is not an access control**, and assuming otherwise is the most common way
+to misread this. Encryption at rest is orthogonal to who may call the API: the
+two Google-managed service agents decrypt on your behalf, so a caller needs no
+KMS permission at all. The Layer 2 matrix proves it — the `analyst` persona
+holds `dataAgentViewer` and no KMS binding of any kind, and reads the
+CMEK-encrypted agent successfully.
+
+What the key gives you instead is a **kill switch**: disable it and nobody can
+read that agent — not the analyst, not an admin, not the service itself — and
+`LIST` stops returning it at all. That is revocation, crypto-shredding, key
+custody and an audit trail on key use. It is not authorization. Layer 2 decides
+who may call the API; Layer 3 decides whether the data is readable at all, and
+you need both.
+
+#### Layer 4 — detect and remediate
+
+A log sink matches `CreateDataAgent` audit entries and publishes them to
+Pub/Sub, which triggers a Cloud Function. The function does **not** trust the
+audit payload: it re-reads the agent on its regional endpoint, because
+`kms_key` is immutable after creation and the server's value is therefore
+authoritative. If that read fails it fails closed rather than assuming
+compliance. A non-compliant agent has its content redacted — twice, since one
+pass only rotates it into the read-only `lastPublishedContext` — and is then
+soft-deleted. End to end, 13–30 s.
+
+It runs in one of two modes, set by the `DRY_RUN` environment variable on its
+Cloud Run service:
+
+| Mode | `DRY_RUN` | Behaviour |
 | :--- | :--- | :--- |
-| 1 — policy gate | `agents[]` in the manifest | `conversation_keys[]`, checked against the **paired region**; also runs in-process before `CreateConversation` |
-| 2 — IAM | `dataAgent*` roles | `cloudaicompanion.topics.*`, via the `gdaConversationUser` custom role |
-| 3 — CMEK at rest | key + agent | same key ring name, **paired region**; the conversation is created by your app, not the pipeline |
-| 4 — detect | `CreateDataAgent`, Admin Activity | `TopicService.CreateTopic`, Data Access (**off by default**) |
-| 4 — verdict | re-reads the agent, rules on it | **cannot re-read** — reports the create and the caller only |
-| 4 — remediate | redact ×2, soft delete | **none possible** — the resource is invisible to the enforcer |
-| 5 — report | per agent, two reconciled sources | per location, and never "clean" — the scanner cannot enumerate conversations it did not create |
+| **Enforcing** | `false` | Actually redacts and soft-deletes non-compliant agents |
+| **Dry-run** | `true` | Logs what it *would* do, changes nothing |
+
+`layer4/deploy.sh` deploys in **enforcing** mode unless you set `DRY_RUN=true`,
+which is why the quick start sets it explicitly. Dry-run first is not caution
+for its own sake: a filter that matches both audit entries of a long-running
+operation (LRO) reads the trailing one as "no key" and deletes a **compliant**
+agent —
+[F2](docs/validation-report.md#f2-createdataagent-emits-two-different-audit-log-shapes).
+Watch it classify your own agents correctly before giving it the power to act.
+
+This is why the agent goes in *before* the enforcer is switched on: Layer 4 is
+already running in shadow mode when the agent is created, so you get to watch a
+real create event flow through it and be judged COMPLIANT before it has the
+power to delete anything.
+
+#### Layer 5 — continuous compliance
+
+An hourly Cloud Run job builds an inventory from two independent sources — Cloud
+Asset Inventory (with a metadata-only read mask, so it never copies agent
+content into BigQuery) and the live API — writes them to BigQuery, and
+classifies every row in the `v_agent_compliance` view. Two sources rather than
+one because a disabled key removes an agent from the live `LIST` with no error;
+anything the API cannot show is reported `NON_COMPLIANT_UNVERIFIABLE` rather
+than dropped or vouched for.
+
+It also emits one row per location for **conversations**, if any exist. That
+half is single-sourced by necessity — Cloud Asset Inventory has no Conversation
+asset type — and it reads every conversation's key rather than one of them,
+because CMEK there is opt-in per conversation. A location fails if any single
+conversation in it is unkeyed.
+
+> Layers 1, 2 and 4 exist to make Layer 3's rule hold. Layer 5 is how you know
+> whether it did.
+
+### Reproduce the agent tests
+
+These tests validate **the deployment you just made** — they do not stand up a
+second one. They do add two things on top of it: a second project holding a
+deliberately unapproved key, and their own *non-compliant* agents, because
+proving Layer 4 removes those is the whole point of the exercise. Expect
+soft-deleted tombstones afterwards, so run this against a disposable estate.
+Verdicts are in [Test status](#part-1--gda-agents) below.
+
+**Offline first.** No GCP project, no credentials — the toolchain from
+[Deploy](#getting-started) is all you need. This covers the
+Layer 1 policy and the in-process gate that enforces it, plus every Python unit
+test. The one thing it cannot cover is the CI wiring itself: only a real pull
+request proves the workflow fires.
+
+In this repo that wiring is **GitHub Actions**
+(`.github/workflows/cmek-policy.yml`), which is how the demo happens to run
+Layer 1 — not part of the control. The two portable pieces are `opa eval`
+against `layer1/policy.rego` and `python -m layer1.apply_manifest`; port those
+to GitLab CI, Cloud Build, Jenkins or a pre-commit hook and Layer 1 is intact.
+See [Layer 1](#layer-1--the-policy-gate).
+
+```bash
+bash tests/run_unit.sh            # 113 unit tests
+bash tests/run_layer1.sh          # policy: compile, lint, unit tests, gate
+```
+
+**Add what the tests need.** The personas are already up from the deployment
+above. The one thing still missing is a second, disposable project holding a
+deliberately unapproved key — set `ROGUE_PROJECT_ID` in
+`config/shared.env.local` first.
+
+```bash
+bash scripts/01_test_fixtures.sh   # the unapproved key the negative tests need
+```
+
+**Run the suite.** The order below is **dependency-ordered, not
+layer-numbered** — the two dependencies that fix it are explained right after
+the block.
+
+```bash
+# Layer 3's test must not race an enforcing Layer 4, so put it in dry-run first.
+# The subshell keeps prelude.sh's `set -euo pipefail` out of your own shell.
+( source scripts/prelude.sh
+  gcloud run services update "${FUNCTION_NAME}" --project="${PROJECT_ID}" \
+    --region="${LOCATION}" --update-env-vars=DRY_RUN=true )
+
+bash tests/run_layer3.sh
+
+( source scripts/prelude.sh
+  gcloud run services update "${FUNCTION_NAME}" --project="${PROJECT_ID}" \
+    --region="${LOCATION}" --update-env-vars=DRY_RUN=false )
+
+bash tests/run_layer4.sh
+bash tests/run_layer5.sh          # incl. the key-revocation proof
+bash tests/run_layer2.sh          # last: needs Layer 4 enforcing
+
+bash scripts/99_teardown.sh       # deletes both projects; prompts
+```
+
+#### Why the test order jumps 3 → 4 → 5 → 2
+
+Each `tests/run_layerN.sh` verifies Layer N — but a test usually has to *do*
+something the layer itself never does, and that is what couples them. Two hard
+dependencies, in opposite directions:
+
+* **The Layer 3 test must run before Layer 4 is enforcing.** It creates a
+  *compliant* agent and then revokes its CMEK key, to prove the key is a real
+  boundary. The enforcer's event for that create arrives ~13–30 s later and does
+  a `GET`, which fails closed while the key is down — so an enforcing Layer 4
+  can redact and soft-delete the test's own compliant fixture mid-run.
+  `tests/run_layer3.sh` aborts rather than race.
+  See [F10](docs/validation-report.md#f10-the-verification-harness-must-not-race-the-enforcer).
+* **The Layer 2 test must run after it.** Its `create` probe makes a key-less
+  agent as the pipeline persona, and an enforcing Layer 4 then remediates it —
+  naming `layer2-cicd-deployer@...` as the caller. That is the defence-in-depth
+  story in one log line, and you only see it in this order.
+
+Everything else follows: the Layer 4 test before the Layer 5 test, so the
+scanner has remediation history to reconcile against.
+### Test status
+
+Built and executed against two purpose-created GCP projects — nothing here is
+designed but untested. **Five-layer end-to-end run: 2026-08-25, all passing.**
+The offline gates (`run_unit.sh`, `run_layer1.sh`) have been re-run since; the
+live layer tests have not been re-executed against a deployed estate after the
+conversation work in Part 2.
+
+| Test | What it verifies | Result |
+| :--- | :--- | :--- |
+| `run_unit.sh` | The shared compliance verdict, audit-log parsing for both resource types, and the reconciliation matrix — offline, no GCP project needed | 113/113 |
+| `run_layer1.sh` | Layer 1 — Regal-linted policy, 46 policy unit tests, policy-gated deploy step | 14/14 |
+| `run_layer2.sh` | Layer 2 — 45-cell persona × operation matrix, live under impersonation | 45/45 |
+| `run_layer3.sh` | Layer 3 — proven by revoking the key, not by inspecting a field | 6/6 |
+| `run_layer4.sh` | Layer 4 — ~13–30 s detect → redact → soft-delete, incl. a compliant agent that must survive | 7/7 |
+| `run_layer5.sh` | Layer 5 — two reconciled sources, proven by key revocation | Passing |
+
+## Part 2 — Conversations
+
+The same five layers applied to `Conversation`, the second CMEK-bearing
+resource type.
+
+### Deploy
 
 `00_bootstrap.sh` already created the paired-region keys in Part 1. What is
 left is a conversation that uses one:
@@ -242,267 +485,50 @@ conversation half matches nothing. The setting covers the whole
 `cloudaicompanion` service, which also backs Gemini Code Assist and Cloud
 Assist, so the log volume includes theirs.
 
-## How it works
+### How it works
 
-The commands above stand up all five layers. Taken in layer order rather than
-run order, this is what each one does.
+Each layer covers conversations, through different mechanics:
 
-### Layer 1 — the policy gate
-
-Layer 1 has no deploy step because it is code, not infrastructure. It runs in
-two places:
-
-* **Locally**, inside `layer3/deploy.sh`, which calls `layer1/render.sh` and
-  then `layer1/apply_manifest.py`. The policy is evaluated in-process and the
-  API is never called at all if the manifest violates it.
-* **In CI**, where `.github/workflows/cmek-policy.yml` runs the same policy on
-  every pull request. Its `policy` and `unit` jobs need no configuration, so a
-  fork goes green on the first push.
-
-**The control is the rule, not the runner.** The goal is that no manifest
-violating the CMEK policy ever reaches the API; GitHub Actions is only how this
-repo demonstrates it. Two portable pieces carry it to any other system:
-`opa eval` against `layer1/policy.rego` for the pre-merge check, and
-`python -m layer1.apply_manifest` for the apply step. The second re-evaluates
-the same rules in-process, so the gate still holds if the CI check is skipped or
-misconfigured — wire those into GitLab CI, Cloud Build, Jenkins or a pre-commit
-hook and Layer 1 is intact.
-
-That workflow also has an optional `deploy` job which applies manifests on push
-to `main`. Enable it with four GitHub repository variables — `WIF_PROVIDER`,
-`DEPLOY_SERVICE_ACCOUNT`, `PROJECT_ID` and `APPROVED_KMS_PROJECTS`. Without them
-it skips cleanly rather than failing, so the workflow is useful with or without
-a GCP connection.
-
-### Layer 2 — the personas
-
-`layer2/deploy.sh` creates five service accounts and a `gdaConversationUser`
-custom role, which exists because no predefined role can create a conversation
-at least privilege. The behavioural probe then impersonates each persona in turn
-and records what it actually can and cannot do.
-
-Those five are *throwaway* identities (`layer2-analyst`, `layer2-no-access`, …)
-built for the probe. Right for a demo estate, wrong for a production one — see
-[Adapting this to your own estate](#adapting-this-to-your-own-estate).
-
-### Layer 3 — how the agent gets its key
-
-`00_bootstrap.sh` creates the key and grants it to the two service agents that
-need it. Those are **Google-managed** —
-`service-<PROJECT_NUMBER>@gcp-sa-geminidataanalytics.iam.gserviceaccount.com`
-and `...@gcp-sa-cloudaicompanion.iam.gserviceaccount.com`. They are derived from
-your `PROJECT_NUMBER`, so nothing is hardcoded to any one project, but you
-cannot substitute a service account of your own: CMEK requires the grant on
-those exact identities.
-
-`layer3/deploy.sh` then creates an agent that uses the key. Between those two
-steps, Layer 3 is simply a rule about how agents get created: every agent
-carries a `kms_key` in an approved project, in a location that supports CMEK
-(`us-east4`, `us`, `eu` — never `global`). The script renders
-`layer1/manifests/agents.json` from the committed template, runs it through the
-CMEK policy, and only then calls the API — so it exercises Layers 1 and 3
-together. In code, the part that matters:
-
-```python
-agent = geminidataanalytics.DataAgent(
-    display_name="Wealth Management Analytics Agent",
-    data_analytics_agent=geminidataanalytics.DataAnalyticsAgent(
-        published_context=published_context,
-    ),
-)
-agent.kms_key = (
-    f"projects/{kms_project}/locations/us-east4"
-    f"/keyRings/gda-kr/cryptoKeys/agent-key"
-)
-
-client.create_data_agent_sync(       # target this location's own endpoint,
-                                     # never the global one
-    request=geminidataanalytics.CreateDataAgentRequest(
-        parent=f"projects/{project}/locations/us-east4",
-        data_agent_id="wealth-management-agent",
-        data_agent=agent,
-    )
-)
-```
-
-**The key can only be set at creation** — it cannot be added or changed
-afterwards, which is exactly what makes Layer 4's read-back check trustworthy.
-Endpoint selection is covered in
-[§4.1](docs/design.md#41-supported-locations-and-endpoints--mandatory).
-
-**CMEK is not an access control**, and assuming otherwise is the most common way
-to misread this. Encryption at rest is orthogonal to who may call the API: the
-two Google-managed service agents decrypt on your behalf, so a caller needs no
-KMS permission at all. The Layer 2 matrix proves it — the `analyst` persona
-holds `dataAgentViewer` and no KMS binding of any kind, and reads the
-CMEK-encrypted agent successfully.
-
-What the key gives you instead is a **kill switch**: disable it and nobody can
-read that agent — not the analyst, not an admin, not the service itself — and
-`LIST` stops returning it at all. That is revocation, crypto-shredding, key
-custody and an audit trail on key use. It is not authorization. Layer 2 decides
-who may call the API; Layer 3 decides whether the data is readable at all, and
-you need both.
-
-### Layer 4 — detect and remediate
-
-A log sink matches `CreateDataAgent` audit entries and publishes them to
-Pub/Sub, which triggers a Cloud Function. The function does **not** trust the
-audit payload: it re-reads the agent on its regional endpoint, because
-`kms_key` is immutable after creation and the server's value is therefore
-authoritative. If that read fails it fails closed rather than assuming
-compliance. A non-compliant agent has its content redacted — twice, since one
-pass only rotates it into the read-only `lastPublishedContext` — and is then
-soft-deleted. End to end, 13–30 s.
-
-It runs in one of two modes, set by the `DRY_RUN` environment variable on its
-Cloud Run service:
-
-| Mode | `DRY_RUN` | Behaviour |
+| Layer | Agents | Conversations |
 | :--- | :--- | :--- |
-| **Enforcing** | `false` | Actually redacts and soft-deletes non-compliant agents |
-| **Dry-run** | `true` | Logs what it *would* do, changes nothing |
+| 1 — policy gate | `agents[]` in the manifest | `conversation_keys[]`, checked against the **paired region**; also runs in-process before `CreateConversation` |
+| 2 — IAM | `dataAgent*` roles | `cloudaicompanion.topics.*`, via the `gdaConversationUser` custom role |
+| 3 — CMEK at rest | key + agent | same key ring name, **paired region**; the conversation is created by your app, not the pipeline |
+| 4 — detect | `CreateDataAgent`, Admin Activity | `TopicService.CreateTopic`, Data Access (**off by default**) |
+| 4 — verdict | re-reads the agent, rules on it | **cannot re-read** — reports the create and the caller only |
+| 4 — remediate | redact ×2, soft delete | **none possible** — the resource is invisible to the enforcer |
+| 5 — report | per agent, two reconciled sources | per location, and never "clean" — the scanner cannot enumerate conversations it did not create |
 
-`layer4/deploy.sh` deploys in **enforcing** mode unless you set `DRY_RUN=true`,
-which is why the quick start sets it explicitly. Dry-run first is not caution
-for its own sake: a filter that matches both audit entries of a long-running
-operation (LRO) reads the trailing one as "no key" and deletes a **compliant**
-agent —
-[F2](docs/validation-report.md#f2-createdataagent-emits-two-different-audit-log-shapes).
-Watch it classify your own agents correctly before giving it the power to act.
+### Reproduce the conversation tests
 
-This is why the agent goes in *before* the enforcer is switched on: Layer 4 is
-already running in shadow mode when the agent is created, so you get to watch a
-real create event flow through it and be judged COMPLIANT before it has the
-power to delete anything.
-
-### Layer 5 — continuous compliance
-
-An hourly Cloud Run job builds an inventory from two independent sources — Cloud
-Asset Inventory (with a metadata-only read mask, so it never copies agent
-content into BigQuery) and the live API — writes them to BigQuery, and
-classifies every row in the `v_agent_compliance` view. Two sources rather than
-one because a disabled key removes an agent from the live `LIST` with no error;
-anything the API cannot show is reported `NON_COMPLIANT_UNVERIFIABLE` rather
-than dropped or vouched for.
-
-It also emits one row per location for **conversations**, if any exist. That
-half is single-sourced by necessity — Cloud Asset Inventory has no Conversation
-asset type — and it reads every conversation's key rather than one of them,
-because CMEK there is opt-in per conversation. A location fails if any single
-conversation in it is unkeyed.
-
-> Layers 1, 2 and 4 exist to make Layer 3's rule hold. Layer 5 is how you know
-> whether it did.
-
-## Reproduce the validation tests
-
-These tests validate **the deployment you just made** — they do not stand up a
-second one. They do add two things on top of it: a second project holding a
-deliberately unapproved key, and their own *non-compliant* agents, because
-proving Layer 4 removes those is the whole point of the exercise. Expect
-soft-deleted tombstones afterwards, so run this against a disposable estate.
-Verdicts are in [Test status](#test-status) below.
-
-**Offline first.** No GCP project, no credentials — the toolchain from
-[Deploy](#quick-start--deploy-the-solution) is all you need. This covers the
-Layer 1 policy and the in-process gate that enforces it, plus every Python unit
-test. The one thing it cannot cover is the CI wiring itself: only a real pull
-request proves the workflow fires.
-
-In this repo that wiring is **GitHub Actions**
-(`.github/workflows/cmek-policy.yml`), which is how the demo happens to run
-Layer 1 — not part of the control. The two portable pieces are `opa eval`
-against `layer1/policy.rego` and `python -m layer1.apply_manifest`; port those
-to GitLab CI, Cloud Build, Jenkins or a pre-commit hook and Layer 1 is intact.
-See [Layer 1](#layer-1--the-policy-gate).
+The counterpart of [Part 1's suite](#reproduce-the-agent-tests). One command
+runs the conversation half of every layer, in dependency order:
 
 ```bash
-bash tests/run_unit.sh            # 113 unit tests
-bash tests/run_layer1.sh          # policy: compile, lint, unit tests, gate
+bash tests/run_conversations.sh
+
+# Structural only — skips the revocation proof, which disables a live KMS key
+# version for several minutes:
+SKIP_REVOCATION=1 bash tests/run_conversations.sh
 ```
 
-**Add what the tests need.** The personas are already up from the deployment
-above. The one thing still missing is a second, disposable project holding a
-deliberately unapproved key — set `ROGUE_PROJECT_ID` in
-`config/shared.env.local` first.
+It calls the two dedicated gates and the Layer 5 probe:
 
-```bash
-bash scripts/01_test_fixtures.sh   # the unapproved key the negative tests need
-```
+| Gate | Asserts |
+| :--- | :--- |
+| `tests/run_layer3_conversation.sh` | The pre-flight gate rejects the documented key path and accepts the paired region; a CMEK conversation is created per location; **the key is a real boundary**, proven by revoking it with a keyless control alongside |
+| `tests/run_layer4_conversation.sh` | The create reaches the enforcer through the `cloudaicompanion` sink, is attributed to the caller, is **not** claimed compliant, and is **not** deleted |
+| `layer5/conversation_cmek_probe.py` | The paired-region rule, opt-in CMEK and the `us-east4` outage all still hold; exits non-zero on drift, so it is safe to wire into CI |
 
-**Run the suite.** The order below is **dependency-ordered, not
-layer-numbered** — the two dependencies that fix it are explained right after
-the block.
+Layer 1's 12 `conversation_keys` policy tests and Layer 2's conversation cells
+run inside `run_layer1.sh` and `run_layer2.sh`; `run_conversations.sh` points at
+them rather than re-running whole agent suites.
 
-```bash
-# Layer 3's test must not race an enforcing Layer 4, so put it in dry-run first.
-# The subshell keeps prelude.sh's `set -euo pipefail` out of your own shell.
-( source scripts/prelude.sh
-  gcloud run services update "${FUNCTION_NAME}" --project="${PROJECT_ID}" \
-    --region="${LOCATION}" --update-env-vars=DRY_RUN=true )
-
-bash tests/run_layer3.sh
-
-( source scripts/prelude.sh
-  gcloud run services update "${FUNCTION_NAME}" --project="${PROJECT_ID}" \
-    --region="${LOCATION}" --update-env-vars=DRY_RUN=false )
-
-bash tests/run_layer4.sh
-bash tests/run_layer5.sh          # incl. the key-revocation proof
-bash tests/run_layer2.sh          # last: needs Layer 4 enforcing
-
-bash scripts/99_teardown.sh       # deletes both projects; prompts
-```
-
-### Why the test order jumps 3 → 4 → 5 → 2
-
-Each `tests/run_layerN.sh` verifies Layer N — but a test usually has to *do*
-something the layer itself never does, and that is what couples them. Two hard
-dependencies, in opposite directions:
-
-* **The Layer 3 test must run before Layer 4 is enforcing.** It creates a
-  *compliant* agent and then revokes its CMEK key, to prove the key is a real
-  boundary. The enforcer's event for that create arrives ~13–30 s later and does
-  a `GET`, which fails closed while the key is down — so an enforcing Layer 4
-  can redact and soft-delete the test's own compliant fixture mid-run.
-  `tests/run_layer3.sh` aborts rather than race.
-  See [F10](docs/validation-report.md#f10-the-verification-harness-must-not-race-the-enforcer).
-* **The Layer 2 test must run after it.** Its `create` probe makes a key-less
-  agent as the pipeline persona, and an enforcing Layer 4 then remediates it —
-  naming `layer2-cicd-deployer@...` as the caller. That is the defence-in-depth
-  story in one log line, and you only see it in this order.
-
-Everything else follows: the Layer 4 test before the Layer 5 test, so the
-scanner has remediation history to reconcile against.
-
-### Validating conversations — a separate suite
-
-Pairs with
-[the conversation deploy step](#part-2--conversations).
-Nothing here is part of the five-layer suite above, and none of it has to run in
-any particular order relative to it — but if you deployed the conversation key,
-run this too. It is the only thing that tells you the key is doing anything.
-
-```bash
-# Posture check: is the paired-region rule still the rule, is CMEK still opt-in,
-# and can us-east4 still not host a conversation? Non-destructive. Exits
-# non-zero on drift, so it is safe to wire into CI.
-python -m layer5.conversation_cmek_probe
-```
-
-The agent equivalent of `run_layer3.sh` — proving the key is a real boundary by
-revoking it rather than by reading a field back — is a separate flag, because it
-disables a live KMS key version for several minutes:
-
-```bash
-python -m layer5.conversation_cmek_probe --revocation
-```
-
-It creates a keyed conversation **and a keyless control**, puts real content in
-both, then disables the key. The keyed one goes dark within a few minutes; the
-control stays readable throughout. Both halves matter: the first shows CMEK
-holds, the second shows it only holds for conversations that asked for it.
+**The revocation proof is the one that matters**, and it is why the suite
+disables a key. It creates a keyed conversation *and a keyless control*, puts
+real content in both, then disables the key: the keyed one goes dark within a
+few minutes, the control stays readable throughout. The first half shows CMEK
+holds; the second shows it holds only for conversations that asked for it.
 
 To reproduce the platform defects themselves — the rejected documented key path
 and the `us-east4` outage — in a project of your own, and get output you can
@@ -518,37 +544,28 @@ path and the paired region side by side, prints replayable `curl` lines, and
 exits non-zero if a documented case succeeds — so it doubles as the check for
 whether this finding has gone stale.
 
-## Test status
+### Test status
 
-Every layer was built and executed against two purpose-created GCP projects —
-nothing here is designed but untested. Each layer has a test in `tests/` that
-you can re-run yourself.
+Measured **2026-08-30/31** in a third, purpose-created project: the
+paired-region key rule, the revocation proof with a keyless control, the
+`us-east4` outage, and the visibility ceiling that limits what Layers 4 and 5
+can claim. `layer3/deploy_conversation.sh`,
+`layer5/conversation_cmek_probe.py` and `scripts/repro_conversation_cmek.py`
+were all run end to end there.
 
-* **Five-layer end-to-end run: 2026-08-25, all passing.** The offline gates
-  (`run_unit.sh`, `run_layer1.sh`) have been re-run since; the live layer tests
-  have not been re-executed against a deployed estate after the conversation
-  work below.
-* **Conversation surface: measured 2026-08-30/31** in a third, purpose-created
-  project — the paired-region key rule, the revocation proof with a keyless
-  control, the `us-east4` outage, and the visibility ceiling that limits what
-  Layers 4 and 5 can claim. `layer5/conversation_cmek_probe.py`,
-  `scripts/repro_conversation_cmek.py` and `layer3/deploy_conversation.sh` were
-  run end to end there.
-* **Layer 4's conversation half: deployed and verified live 2026-08-31.**
-  `tests/run_layer4_conversation.sh` passed against a real enforcer: both
-  conversations reported and attributed to the caller, neither judged
-  compliant, neither deleted. That run is what found the visibility ceiling in
-  the first place.
+**Layer 4's conversation half was deployed and verified live on 2026-08-31.**
+Both conversations were reported and attributed to the caller, neither judged
+compliant, neither deleted. That run is what found the visibility ceiling.
 
 | Test | What it verifies | Result |
 | :--- | :--- | :--- |
-| `run_unit.sh` | The shared compliance verdict, audit-log parsing for both resource types, and the reconciliation matrix — offline, no GCP project needed | 113/113 |
-| `run_layer1.sh` | Layer 1 — Regal-linted policy, 46 policy unit tests (agents and conversation keys), policy-gated deploy step | 14/14 |
-| `run_layer2.sh` | Layer 2 — 45-cell persona × operation matrix, live under impersonation, incl. conversations | 45/45 |
-| `run_layer3.sh` | Layer 3 — proven by revoking the key, not by inspecting a field | 6/6 |
-| `run_layer4.sh` | Layer 4 — ~13–30 s detect → redact → soft-delete, incl. a compliant agent that must survive | 7/7 |
+| `run_conversations.sh` | The whole conversation suite, in dependency order | New; not yet run end to end |
+| `run_layer3_conversation.sh` | Layer 3 — the paired-region gate, then the boundary proven by revoking the key with a keyless control alongside | New; not yet run end to end |
 | `run_layer4_conversation.sh` | Layer 4, conversations — create reported and attributed, no compliance claimed, nothing deleted | Passing |
-| `run_layer5.sh` | Layer 5 — two reconciled sources, proven by key revocation; conversation CMEK rules re-measured | Passing |
+| `run_layer5.sh` (steps 7–8) | Layer 5 — the posture probe and the per-location verdict | Passing |
+
+Layer 1's 12 `conversation_keys` policy tests run inside `run_layer1.sh`, and
+Layer 2's conversation cells inside `run_layer2.sh`; neither is repeated here.
 
 ## Where the CMEK key goes
 
@@ -657,6 +674,7 @@ Two API behaviours to know before submitting a conversation key:
 | `layer4/` | Remediation function, log sink, deploy |
 | `layer5/` | Compliance scanner, BigQuery DDL and view, deploy |
 | `tests/` | Per-layer gates + `unit/` (offline Python tests) |
+| `tests/run_conversations.sh` | The conversation suite: Layers 3, 4 and 5 for the second resource type |
 | `.github/workflows/` | Reference CI pipeline for Layers 1 and 2 |
 
 `common/gda_common.py` is deliberately the only place compliance is decided, so

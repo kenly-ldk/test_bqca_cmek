@@ -747,7 +747,7 @@ location and the whole finding needs re-validation.
 Full prerequisites and the two-project requirement are in
 [§10 of design.md](design.md#10-reproducing-this); the command sequence and the
 reason the test order is dependency-ordered rather than layer-numbered are in
-the [README](../README.md#reproduce-the-validation-tests).
+the [README](../README.md#reproduce-the-agent-tests).
 
 **Expected nondeterminism.** Two things legitimately vary between runs and are
 reported rather than asserted: the `ExportAssets` DataAgent row count (F3), and
