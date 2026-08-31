@@ -1031,7 +1031,7 @@ it is real and reproducible (§1.2).
 
 ## 10. Reproducing This
 
-Everything below runs end-to-end in a throwaway project.
+Everything below runs end-to-end in a disposable project.
 
 ### 10.1 Repository layout
 

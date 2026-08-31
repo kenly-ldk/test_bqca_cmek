@@ -27,7 +27,9 @@ that governance, in five layers.
 | 5 — Continuous compliance | Reports the standing CMEK posture for audit, and flags what it could not verify — which on the conversation surface is everything it cannot see |
 
 Layers 1 and 2 are preventive, 4 and 5 are detective, and 3 is the cryptographic
-boundary the other four exist to keep enforced.
+boundary the other four exist to keep enforced. Each part below opens with a
+diagram of its own path — [agents](#how-it-works),
+[conversations](#how-it-works-1) — because the two differ at almost every layer.
 
 **This is not equivalent to native CMEK org-policy enforcement.** Native
 enforcement stops a non-compliant resource from ever existing. This framework
@@ -60,10 +62,8 @@ this section serves both.
 Which KMS location each resource type needs is tabulated in
 [Where the CMEK key goes](#where-the-cmek-key-goes).
 
-Deploying needs `gcloud`, `bq` and Python: `deploy_agents.sh` evaluates the CMEK
-policy in-process, in Python, before it calls the API. OPA and Regal are only
-used by the Layer 1 policy's own tests, but the block below installs everything
-in one go.
+Deploying needs `gcloud`, `bq` and Python. OPA and Regal are needed only to run
+Layer 1's own tests; the block below installs everything in one go.
 
 **Install** — versions are pinned deliberately: the policy is Rego v1 (OPA ≥1.0)
 and `.regal/` carries a custom rule written against Regal's 0.42 rule API.
@@ -81,7 +81,7 @@ git clone https://github.com/kenly-ldk/test_bqca_cmek.git
 cd test_bqca_cmek
 
 # An isolated interpreter, so these client libraries cannot collide with
-# anything else on the machine. 3.12 matches the Cloud Function runtime that
+# anything else on the machine. 3.12 matches the Cloud Run functions runtime
 # Layer 4 deploys to, so local behaviour and deployed behaviour agree.
 pyenv virtualenv 3.12.7 gda-cmek-val && pyenv local gda-cmek-val
 
@@ -103,6 +103,48 @@ curl -sL -o ~/.local/bin/opa   https://github.com/open-policy-agent/opa/releases
 curl -sL -o ~/.local/bin/regal https://github.com/StyraInc/regal/releases/download/v0.42.0/regal_Linux_x86_64
 chmod +x ~/.local/bin/opa ~/.local/bin/regal
 ```
+
+### What the demo deploys
+
+This is the **one combination the deploy scripts actually stand up**, not the
+set of combinations that work. Every value is a default in
+[`config/shared.env`](config/shared.env), overridable in `shared.env.local`.
+For what has been *tested* across the other combinations, see
+[Where the CMEK key goes](#where-the-cmek-key-goes).
+
+| | Variable | Value | Why |
+| :--- | :--- | :--- | :--- |
+| **Agent** `pipeline-wealth-agent` | `AGENT_LOCATION` | `us` | Its CMEK key goes in `us` too — an agent's key is co-located with the agent |
+| **Conversation** | `CONVERSATION_LOCATIONS` | `us` | Its key goes in **`us-central1`** — the multi-region's *paired* region, never `us` itself |
+| **Layer 4 / Layer 5 infra** | `INFRA_REGION` | `us-east4` | A **Cloud Run region**, not a GDA location. `us` is a multi-region and `gcloud run` rejects it |
+| **Unapproved key** (tests only) | — | `rogue-kr` / `rogue-key` in `ROGUE_PROJECT_ID`, in `us` | A second project, so Layer 4's unapproved-key path is reachable |
+
+One agent and one conversation, both in the `us` multi-region — but **two key
+rings**, `us` for the agent and `us-central1` for the conversation, because the
+two resource types disagree about where the key goes. Same key ring and key
+*name* in both; only the KMS location differs.
+
+`INFRA_REGION` is the one that catches people out: it is where the enforcer
+function and scanner job are *deployed*, and has nothing to do with which
+locations they govern — the enforcer reaches every location over the API.
+Setting it to `us` fails the deploy, so `prelude.sh` rejects that up front.
+
+> **`eu` is supported but not deployed by default.** Set
+> `CONVERSATION_LOCATIONS=us,eu` and `AGENT_LOCATION=eu` to exercise it. The
+> `us` → `us-central1`, `eu` → `europe-west1` map in `common/gda_common.py` is
+> the platform rule and is not configurable; `CONVERSATION_LOCATIONS` only
+> selects which of its entries this estate deploys into, and rejects a location
+> that cannot host a conversation rather than burning the one-shot key slot on
+> it. Both are verified live by [`tests/run_matrix.sh`](tests/run_matrix.sh).
+
+| Everything else | Value |
+| :--- | :--- |
+| Sample datasource | `cymbal_demo.customers`, BigQuery, `us-east4` |
+| Layer 2 personas | `layer2-` + `cicd-deployer`, `app-runtime`, `analyst`, `conv-user`, `no-access` |
+| Layer 4 enforcer | `gda-cmek-enforcer` (Cloud Run function, `us-east4`), sink `gda-cmek-create-sink`, topic `gda-cmek-violations` |
+| Layer 5 scanner | `gda-inventory-scanner` (Cloud Run job, `us-east4`), hourly (`0 * * * *`) |
+| Layer 5 output | `gda_compliance.agent_inventory` + view `v_agent_compliance`, BigQuery `us-east4` |
+| Locations the scanner sweeps | `us-east4`, `us`, `eu`, `global` — `global` included so agents that *cannot* be CMEK-encrypted still surface as non-compliant |
 
 ## Part 1 — GDA agents
 
@@ -166,15 +208,61 @@ overrides only what you set in it:
 | `APPROVED_KMS_PROJECTS` | Layers 1, 4, 5 | The CMEK allowlist. The policy, the enforcer and the scanner all read the same value, so they cannot disagree |
 | `ROGUE_PROJECT_ID` | validation only | A second disposable project. Leave the placeholder unless you are running the test suite |
 
-Everything else — `LOCATION`, `KMS_KEYRING`/`KMS_KEY`, `BQ_DATASET`,
+Everything else — `AGENT_LOCATION`, `CONVERSATION_LOCATIONS`, `INFRA_REGION`,
+`KMS_KEYRING`/`KMS_KEY`, `BQ_DATASET`,
 `SCAN_LOCATIONS`, the Pub/Sub topic and function names — comes with a default in
-`config/shared.env`. Override any of them in `shared.env.local` if the defaults
-do not suit your estate.
+`config/shared.env`, tabulated under
+[What the demo deploys](#what-the-demo-deploys). Override any of them in
+`shared.env.local` if the defaults do not suit your estate, but note that the
+locations are constrained by the platform rather than freely chosen.
 
 ### How it works
 
 The commands above stand up all five layers. Taken in layer order rather than
 run order, this is what each one does.
+
+```mermaid
+flowchart LR
+    M["Agent manifest<br/>in Git"] --> L1{"Layer 1<br/>CMEK policy<br/>CI + in-process"}
+    L1 -->|violation| X["Rejected —<br/>no API call made"]
+    B["Any other route:<br/>console, SDK, gcloud"] --> L2{"Layer 2<br/>IAM — who may<br/>call create"}
+    L2 -->|not granted| Y["Permission<br/>denied"]
+
+    L1 -->|compliant| API(["GDA API<br/>regional endpoint"])
+    L2 -->|granted| API
+    API --> L3["Layer 3 — CMEK at rest<br/>revoke the key and the<br/>content is unreadable"]
+
+    API -.->|"audit log"| L4["Layer 4 — event-driven<br/>re-reads the agent, rules on it,<br/>redacts twice, soft-deletes"]
+    L3 -.->|"scanned hourly"| L5["Layer 5 — reconciles CAI<br/>+ live API into BigQuery"]
+
+    style X stroke:#c0392b,stroke-width:2px
+    style Y stroke:#c0392b,stroke-width:2px
+    style L3 stroke:#1e8449,stroke-width:2px
+```
+
+The left half is what *should* happen; the right half exists because it might
+not. Layer 2 is the honest admission that Layer 1 only governs the pipeline —
+anyone with `dataAgents.create` can go around it, so Layers 4 and 5 assume
+someone will. What that costs is a window rather than a block:
+
+```text
+t=0       a non-compliant agent is created outside the pipeline
+          │
+~13-30 s  ├── Layer 4   audit log -> sink -> Pub/Sub -> enforcer
+          │             content redacted twice, resource soft-deleted
+          │             <-- exposure window: the content is readable here
+          │
+ <= 1 h   └── Layer 5   hourly scan, two independent sources
+                        catches what Layer 4's event stream never saw
+                        (a log sink does not backfill what it missed)
+
+ 30 days      the redacted tombstone remains -- the API has no purge
+```
+
+Layer 5 is not a duplicate of Layer 4. It reads Cloud Asset Inventory and the
+live API directly, never the enforcer's output, so a create that Layer 4 missed
+is still caught within the hour — which is the whole reason there are two
+detective layers rather than one.
 
 #### Layer 1 — the policy gate
 
@@ -210,8 +298,9 @@ custom role, which exists because no predefined role can create a conversation
 at least privilege. The behavioural probe then impersonates each persona in turn
 and records what it actually can and cannot do.
 
-Those five are *throwaway* identities (`layer2-analyst`, `layer2-no-access`, …)
-built for the probe. Right for a demo estate, wrong for a production one — see
+Those five are test identities (`layer2-analyst`, `layer2-no-access`, …)
+created for the probe, not principals you would grant in production. Apply the
+persona model to your own principals instead — see
 [Adapting this to your own estate](#adapting-this-to-your-own-estate).
 
 #### Layer 3 — how the agent gets its key
@@ -276,7 +365,7 @@ you need both.
 #### Layer 4 — detect and remediate
 
 A log sink matches `CreateDataAgent` audit entries and publishes them to
-Pub/Sub, which triggers a Cloud Function. The function does **not** trust the
+Pub/Sub, which triggers a Cloud Run function. The function does **not** trust the
 audit payload: it re-reads the agent on its regional endpoint, because
 `kms_key` is immutable after creation and the server's value is therefore
 authoritative. If that read fails it fails closed rather than assuming
@@ -284,8 +373,21 @@ compliance. A non-compliant agent has its content redacted — twice, since one
 pass only rotates it into the read-only `lastPublishedContext` — and is then
 soft-deleted. End to end, 13–30 s.
 
-It runs in one of two modes, set by the `DRY_RUN` environment variable on its
-Cloud Run service:
+**Which product this is**, because the repo uses two and the names are easy to
+confuse. Layer 4's enforcer is a **Cloud Run function**
+(`gcloud functions deploy --gen2` — the product formerly called Cloud Functions
+2nd gen). Layer 5's scanner is a plain **Cloud Run job**
+(`gcloud run jobs deploy`), not a function. Nothing here uses 1st-gen functions.
+
+A Cloud Run function *is* backed by a Cloud Run service, so it answers to both
+CLIs — and this repo uses both deliberately: `gcloud functions deploy` to create
+it, because only that wires the Eventarc trigger, and `gcloud run services
+update` to flip `DRY_RUN` without a redeploy. The one place the distinction
+bites is deletion — see
+[gotchas](docs/gotchas.md).
+
+It runs in one of two modes, set by the `DRY_RUN` environment variable on the
+Cloud Run service backing it:
 
 | Mode | `DRY_RUN` | Behaviour |
 | :--- | :--- | :--- |
@@ -396,10 +498,12 @@ scanner has remediation history to reconcile against.
 ### Test status
 
 Built and executed against two purpose-created GCP projects — nothing here is
-designed but untested. **Re-run end to end on 2026-08-31**, through the
-restructured setup and deploy scripts, against a live estate: `00_bootstrap.sh`
-→ `setup_agents.sh --with-fixtures` → `deploy_controls.sh` → `deploy_agents.sh`
-→ `deploy_agents.sh --enforce` → `run_agents.sh`, all passing.
+designed but untested. **Re-run end to end on 2026-08-31** against a live
+estate, through the restructured scripts and the current defaults
+(`AGENT_LOCATION=us`, `INFRA_REGION=us-east4`): `00_bootstrap.sh` →
+`setup_agents.sh --with-fixtures` → `deploy_controls.sh` → `deploy_agents.sh`
+→ `run_agents.sh`, all passing. The CMEK boundary is therefore now proven by
+key revocation in the `us` multi-region, not only in `us-east4`.
 
 | Test | What it verifies | Result |
 | :--- | :--- | :--- |
@@ -424,12 +528,12 @@ adds is its own keys, in different KMS locations, and the audit logs that make
 the create visible:
 
 ```bash
-# 1. Conversation setup — the paired-region keys, and the cloudaicompanion Data
-#    Access logs without which Layer 4's conversation half matches nothing.
+# 1. Conversation setup — the paired-region keys, and the cloudaicompanion
+#    Data Access logs without which Layer 4's conversation half sees nothing.
 bash scripts/setup_conversations.sh
 
-# 2. Layer 3 — a policy-gated CMEK conversation per location. Needs at least one
-#    DataAgent to reference, from Part 1; it may be in another location.
+# 2. Layer 3 — a policy-gated CMEK conversation per location. Needs at least
+#    one DataAgent to reference, from Part 1; it may be in another location.
 bash scripts/deploy_conversations.sh
 ```
 
@@ -437,6 +541,71 @@ bash scripts/deploy_conversations.sh
 registers it permanently for the whole project + location, including when the
 create then fails, and no API frees the slot. A wrong key cannot be corrected
 afterwards, so the check runs first rather than as a read-back.
+
+**Audit prerequisite.** Conversations emit no `geminidataanalytics` audit log.
+The create appears only as a `cloudaicompanion` **Data Access** entry, which is
+off by default; `setup_conversations.sh` enables it, and without it Layer 4's
+conversation half matches nothing. The setting covers the whole
+`cloudaicompanion` service, which also backs Gemini Code Assist and Cloud
+Assist, so the log volume includes theirs.
+
+### How it works
+
+Each layer covers conversations, through different mechanics:
+
+| Layer | Agents | Conversations |
+| :--- | :--- | :--- |
+| 1 — policy gate | `agents[]` in the manifest | `conversation_keys[]`, checked against the **paired region**; also runs in-process before `CreateConversation` |
+| 2 — IAM | `dataAgent*` roles | `cloudaicompanion.topics.*`, via the `gdaConversationUser` custom role |
+| 3 — CMEK at rest | key + agent | same key ring name, **paired region**; the conversation is created by your app, not the pipeline |
+| 4 — detect | `CreateDataAgent`, Admin Activity | `TopicService.CreateTopic`, Data Access (**off by default**) |
+| 4 — verdict | re-reads the agent, rules on it | **cannot re-read** — reports the create and the caller only |
+| 4 — remediate | redact ×2, soft delete | **none possible** — the resource is invisible to the enforcer |
+| 5 — report | per agent, two reconciled sources | per location, and never "clean" — the scanner cannot enumerate conversations it did not create |
+
+Set against [the agent diagram](#how-it-works), the same five layers change
+shape almost everywhere:
+
+```mermaid
+flowchart LR
+    MAN["A manifest declaring<br/>a conversation"] --> DENY["Layer 1 denies it —<br/>conversations are runtime<br/>resources, never declared"]
+
+    APP["Your application"] --> L1{"Layer 1<br/>conversation_keys allowlist<br/>in-process, in your app"}
+    L1 -->|"wrong key"| X["Rejected before the call —<br/>which also protects the<br/>one-shot key slot"]
+    L1 -->|"paired-region key"| L2{"Layer 2<br/>cloudaicompanion.topics.create<br/>gdaConversationUser"}
+    L2 -->|"not granted"| Y["Permission denied"]
+    L2 -->|"granted"| API(["CreateConversation<br/>us or eu only"])
+    API --> L3["Layer 3 — CMEK at rest<br/>key in the PAIRED region,<br/>opt-in per conversation"]
+
+    API -.->|"Data Access log<br/>off by default"| L4["Layer 4 — reports the create<br/>and the caller. Cannot read it<br/>back, judge it, or delete it"]
+    L3 -.->|"listed per location"| L5["Layer 5 — one verdict row per<br/>location, never clean: it cannot<br/>see what it did not create"]
+
+    style X stroke:#c0392b,stroke-width:2px
+    style Y stroke:#c0392b,stroke-width:2px
+    style DENY stroke:#c0392b,stroke-width:2px
+    style L3 stroke:#1e8449,stroke-width:2px
+```
+
+**The preventive half carries the weight, because the detective half cannot.**
+Layer 4 detects and attributes, but cannot verify or remediate — the one place
+the two resource types genuinely diverge, and a platform property rather than a
+design choice. A conversation is readable *only by the principal that created
+it*: a service account holding `cloudaicompanion.topics.get` gets an empty list
+and a 404, and `roles/cloudaicompanion.topicAdmin` changes nothing. So the
+enforcer cannot read a conversation's key, cannot issue a compliance verdict on
+one, and could not delete one either. What it does emit is the fact of creation,
+the location, and the caller — recorded nowhere else a compliance team would
+look:
+
+```
+CONVERSATION_CREATED_CMEK_UNVERIFIABLE  caller=analyst@example.com
+  projects/P/locations/us/conversations/...  action_taken=NONE_CANNOT_READ
+```
+
+The control that actually binds on this surface is therefore **preventive**:
+Layer 1 gates the key, Layer 2 restricts who may call `CreateConversation` at
+all, and your application sets `kms_key` on every call. Layer 5 reports what it
+could not see rather than vouching for it.
 
 **Your application creates the real conversations,** not a deploy step. Layer 1
 rejects any manifest that declares one, and the key must be supplied per call:
@@ -467,47 +636,6 @@ Omit `kms_key` and the conversation is unencrypted. It does not inherit the key
 registered for the project and location, and stays readable while that key is
 disabled. That is why Layer 4 and Layer 5 both cover this surface rather than
 trusting the key's existence.
-
-**Layer 4 detects and attributes; it cannot verify or remediate.** This is the
-one place where the two resource types genuinely diverge, and it is a platform
-property rather than a design choice. A conversation is readable *only by the
-principal that created it* — a service account holding
-`cloudaicompanion.topics.get` gets an empty list and a 404, and
-`roles/cloudaicompanion.topicAdmin` changes nothing. So the enforcer cannot read
-a conversation's key, cannot issue a compliance verdict on one, and could not
-delete one either. What it does emit is the fact of creation, the location, and
-the caller — recorded nowhere else a compliance team would look:
-
-```
-CONVERSATION_CREATED_CMEK_UNVERIFIABLE  caller=analyst@example.com
-  projects/P/locations/us/conversations/...  action_taken=NONE_CANNOT_READ
-```
-
-The control that actually binds on this surface is therefore **preventive**:
-Layer 1 gates the key, Layer 2 restricts who may call `CreateConversation` at
-all, and your application sets `kms_key` on every call. Layer 5 reports what it
-could not see rather than vouching for it.
-
-**Audit prerequisite.** Conversations emit no `geminidataanalytics` audit log.
-The create appears only as a `cloudaicompanion` **Data Access** entry, which is
-off by default; `setup_conversations.sh` enables it, and without it Layer 4's
-conversation half matches nothing. The setting covers the whole
-`cloudaicompanion` service, which also backs Gemini Code Assist and Cloud
-Assist, so the log volume includes theirs.
-
-### How it works
-
-Each layer covers conversations, through different mechanics:
-
-| Layer | Agents | Conversations |
-| :--- | :--- | :--- |
-| 1 — policy gate | `agents[]` in the manifest | `conversation_keys[]`, checked against the **paired region**; also runs in-process before `CreateConversation` |
-| 2 — IAM | `dataAgent*` roles | `cloudaicompanion.topics.*`, via the `gdaConversationUser` custom role |
-| 3 — CMEK at rest | key + agent | same key ring name, **paired region**; the conversation is created by your app, not the pipeline |
-| 4 — detect | `CreateDataAgent`, Admin Activity | `TopicService.CreateTopic`, Data Access (**off by default**) |
-| 4 — verdict | re-reads the agent, rules on it | **cannot re-read** — reports the create and the caller only |
-| 4 — remediate | redact ×2, soft delete | **none possible** — the resource is invisible to the enforcer |
-| 5 — report | per agent, two reconciled sources | per location, and never "clean" — the scanner cannot enumerate conversations it did not create |
 
 ### Reproduce the conversation tests
 
@@ -552,6 +680,10 @@ and the `us-east4` outage — in a project of your own, and get output you can
 attach to a support case:
 
 ```bash
+# The one thing the shared install above does NOT cover: this script is
+# deliberately independent of the repo, so it has its own two dependencies.
+pip install -r scripts/requirements-repro.txt   # google-auth, requests
+
 python scripts/repro_conversation_cmek.py --project YOUR_PROJECT --setup
 ```
 
@@ -584,7 +716,7 @@ the keyless control stayed readable throughout.
 | :--- | :--- | :--- |
 | `run_conversations.sh` | The whole conversation suite, in dependency order | Passing |
 | `run_layer3_conversation.sh` | Layer 3 — the paired-region gate, then the boundary proven by revoking the key with a keyless control alongside | Passing |
-| `run_layer4_conversation.sh` | Layer 4, conversations — create reported and attributed, no compliance claimed, nothing deleted | Passing in `us` **and `eu`** |
+| `run_layer4_conversation.sh` | Layer 4, conversations — create reported and attributed, no compliance claimed, nothing deleted | Passing |
 | `layer5/conversation_cmek_probe.py` | Layer 5 — the posture probe, run first so it measures an estate no test has disturbed | Passing |
 | `run_layer5.sh` (steps 7–8) | The same probe and the per-location verdict, from inside the agent gate. Step 7 skips on an agents-only estate | Passing |
 
@@ -671,6 +803,38 @@ key path from the conversation's own location. That path is rejected in `us` and
 [F8](docs/validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location)
 and [§4.1](docs/design.md#41-supported-locations-and-endpoints--mandatory).
 
+### What has actually been exercised live
+
+The tables above are the rules. This is the subset measured against the live
+API, as distinct from the single combination the deploy scripts stand up. The
+first six rows are generated by [`tests/run_matrix.sh`](tests/run_matrix.sh),
+which prints this table as its output, so they can be regenerated on demand
+rather than trusted:
+
+| Combination | Key location | Result |
+| :--- | :--- | :--- |
+| `DataAgent` in `us` | `us` | Pass — created, key confirmed on read-back |
+| `DataAgent` in `us-east4` | `us-east4` | Pass — created, key confirmed on read-back |
+| `DataAgent` in `eu` | `europe` | Pass — created, key confirmed on read-back |
+| `DataAgent` in `global` | none accepted | Correctly refused — cannot be CMEK-encrypted, so Layers 4 and 5 must flag it |
+| **`us` agent + `us` conversation** | `us` **and** `us-central1` | Pass — one multi-region, two key locations |
+| **`eu` agent + `eu` conversation** | `europe` **and** `europe-west1` | Pass — one multi-region, two key locations |
+| `DataAgent` with a key in an unapproved project | `us`, second project | Pass as a negative — created, then detected and remediated by Layer 4 (`run_agents.sh`) |
+| `Conversation` in `us` / `eu` | paired region | Pass — content went dark ~4 min after the key was disabled, a keyless control stayed readable (`run_conversations.sh`) |
+| `Conversation` in `us` / `eu` | every other KMS location | Correctly rejected — 13 locations probed for `us`, 11 for `eu` (`conversation_cmek_probe.py`) |
+| `Conversation` in `us-east4` | any, or none | Cannot be created at all — 0 of 13 attempts |
+
+Measured 2026-08-31. The last four rows come from the suites and probes named
+in them rather than from the matrix script, which deliberately does not repeat
+work a cheaper script already does — the key-revocation proof and the 24
+rejected KMS locations in particular.
+
+The `us` agent + `us` conversation row is the combination most likely in
+production, and it is what the demo now ships: a conversation must live in `us`
+or `eu`, so pairing one with an agent in the same multi-region means running two
+key rings in one project. Layer 5 sweeps `us-east4`, `us`, `eu` and `global` on
+every scan, so agents in all four are reported regardless of where you deploy.
+
 Two API behaviours to know before submitting a conversation key:
 
 * The API holds **one registered key per project per location**. The first key
@@ -703,6 +867,7 @@ Two API behaviours to know before submitting a conversation key:
 | `tests/` | Per-layer gates + `unit/` (offline Python tests) |
 | `tests/run_agents.sh` | The agent suite: every layer's agent half, and the Layer 4 dry-run toggling its order needs |
 | `tests/run_conversations.sh` | The conversation suite: Layers 3, 4 and 5 for the second resource type |
+| `tests/run_matrix.sh` | The combination matrix — agent × key location, and the agent+conversation pairing. Not a demo suite; it is what generates the coverage table |
 | `.github/workflows/` | Reference CI pipeline for Layers 1 and 2 |
 
 `common/gda_common.py` is deliberately the only place compliance is decided, so
@@ -727,6 +892,7 @@ run against a project you care about:
 | `layer4/` | **Yes** | Log sink → Pub/Sub → remediation function. Nothing to change beyond `config/shared.env.local` |
 | `layer5/` | **Yes** | Set `SCAN_LOCATIONS` and `APPROVED_KMS_PROJECTS` for your estate |
 | `tests/run_agents.sh`, `tests/run_conversations.sh`, `tests/run_layer*.sh` | **As acceptance tests** | They create and delete real agents and conversations, so point them at a non-production project |
+| `tests/run_matrix.sh` | **No** | Validation only. It creates agents across four locations to map where CMEK is accepted, ignoring your configured location entirely |
 
 ## Going deeper
 

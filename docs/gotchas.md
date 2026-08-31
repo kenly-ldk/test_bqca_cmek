@@ -1,4 +1,4 @@
-# Twenty-three things that will cost you time
+# Twenty-five things that will cost you time
 
 Practical surprises from building and validating this framework against the live
 API — the things that are obvious in hindsight and expensive in the moment. Each
@@ -78,6 +78,18 @@ they feed into, live elsewhere:
   same test ran six minutes later, and both had passed twice earlier that day
   against a warm sink. `run_layer4_conversation.sh` now waits for the sink to
   reach `SINK_SETTLE_SECONDS` (default 300) before creating anything.
+* **One "location" variable cannot serve GDA and Cloud Run.** A GDA location is
+  `us-east4`, `us`, `eu` or `global`; a Cloud Run region is `us-east4`,
+  `us-central1` and so on. They overlap at `us-east4` — which is exactly why a
+  single `LOCATION` variable appears to work until someone sets it to the `us`
+  multi-region, at which point `gcloud run`, `gcloud functions` and
+  `gcloud scheduler` all reject it. This repo now splits them into
+  `AGENT_LOCATION` and `INFRA_REGION`, and `prelude.sh` refuses a multi-region
+  in the latter. The failure is worse than a plain error: in
+  `layer5/revocation_proof.py` the failed `jobs execute` was captured with
+  `check=False`, so the scanner never re-ran, the inventory kept the PREVIOUS
+  scan's rows, and the proof then reported agents COMPLIANT that it had just
+  hidden — a false pass in one direction and a false failure in the other.
 * **A CMEK posture probe must run before anything in the same suite revokes a
   key.** Re-enabling a key version propagates on the same multi-minute timescale
   as disabling one — the revocation proof measures a keyed conversation going
@@ -95,15 +107,17 @@ they feed into, live elsewhere:
   `topics.setIamPolicy`, still gets `{}` from LIST and **404** from GET for
   another principal's conversation. So no scanner can inventory the surface and
   no enforcer can verify a key. Govern it before creation, not after.
-* **`logger.info` is invisible in a gen2 Cloud Function.** `functions_framework`
+* **`logger.info` is invisible in a Cloud Run function.** `functions_framework`
   configures logging first, so your `logging.basicConfig(level=INFO)` is a no-op
   and the root logger stays at WARNING. `logger.error` and plain `print` both
   show up; INFO silently does not. Diagnosing "the function ran but logged
   nothing" costs an hour.
-* **`gcloud run services delete` does not delete a gen2 function.** The function
-  resource survives, and the next deploy warns *"the service was not found,
-  redeployed with default values"* and comes back with its Eventarc trigger
-  broken — so it is never invoked again. Use `gcloud functions delete`.
+* **`gcloud run services delete` does not delete a Cloud Run function.** A
+  function is backed by a Cloud Run service, so it answers to `gcloud run`
+  — but deleting the service leaves the *function* resource behind, and the
+  next deploy warns *"the service was not found, redeployed with default
+  values"* and comes back with its Eventarc trigger broken, so it is never
+  invoked again. Use `gcloud functions delete`.
 * **Conversation lifecycle logs are Data Access, under `cloudaicompanion`.**
   `CreateConversation` emits nothing under `geminidataanalytics`; it appears as
   `TopicService.CreateTopic`, in a log stream that is **off by default**, with
