@@ -85,7 +85,7 @@ gcloud pubsub topics create "${PUBSUB_TOPIC}" --project="${PROJECT_ID}" 2>/dev/n
 #
 # Conversations: there is NO geminidataanalytics audit log for them at all. The
 #   create surfaces as cloudaicompanion TopicService.CreateTopic, in DATA ACCESS
-#   logs, which are OFF BY DEFAULT — scripts/00_bootstrap.sh enables them, and
+#   logs, which are OFF BY DEFAULT — scripts/setup_conversations.sh enables them, and
 #   without that this half of the sink matches nothing. CreateTopic emits the
 #   same two-entry LRO pair as CreateDataAgent, so `/topics/` keeps only the
 #   entry that names the resource. The payload carries no key; the function

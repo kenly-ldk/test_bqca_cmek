@@ -6,7 +6,7 @@
 # other resource type, and it is a separate script because the two differ in
 # every mechanical detail even though the control is identical.
 #
-# The keys themselves come from scripts/00_bootstrap.sh, exactly as the agent
+# The keys themselves come from scripts/setup_conversations.sh, exactly as the agent
 # key does — conversations need theirs in the multi-region's PAIRED region
 # (`us` -> `us-central1`, `eu` -> `europe-west1`), which is not where the agents'
 # key lives (validation-report F8).
@@ -17,7 +17,7 @@
 # permanently for the whole project+location even if the call then fails, so the
 # check cannot be an after-the-fact assertion.
 #
-#   bash layer3/deploy_conversation.sh
+#   bash scripts/deploy_conversations.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../scripts/prelude.sh"
 
 CONVERSATION_LOCATIONS="$(python -c 'import sys; sys.path.insert(0, "'"${REPO_ROOT}"'");
@@ -42,9 +42,9 @@ in order of likelihood:
 
   * APPROVED_KMS_PROJECTS does not list the project holding the key, so the
     policy blocked the call. Set it in config/shared.env.local.
-  * No DataAgent exists yet — run `bash layer3/deploy.sh` first. A conversation
+  * No DataAgent exists yet — run `bash scripts/deploy_agents.sh` first. A conversation
     must reference one, though it may be in another location.
-  * The paired-region key is missing — re-run `bash scripts/00_bootstrap.sh`.
+  * The paired-region key is missing — run `bash scripts/setup_conversations.sh`.
   * The project+location already has a DIFFERENT key registered. That
     registration is permanent and cannot be reassigned; the only remedy is a
     different project. See validation-report F8.

@@ -110,7 +110,7 @@ def create(location: str, conversation_id: str) -> str | None:
     agent = find_anchor_agent(project, location, env.get("LOCATION", location))
     if agent is None:
         print(f"[SKIPPED] no DataAgent to anchor a conversation to. "
-              f"Run layer3/deploy.sh first.")
+              f"Run scripts/deploy_agents.sh first.")
         return None
 
     parent = f"projects/{project}/locations/{location}"

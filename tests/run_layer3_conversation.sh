@@ -12,7 +12,7 @@
 #     conversation and "the messages went dark" means nothing unless an
 #     unprotected one stayed readable
 #
-# Prerequisites: scripts/00_bootstrap.sh (paired-region keys) and at least one
+# Prerequisites: scripts/setup_conversations.sh (paired-region keys) and at least one
 # DataAgent to anchor a conversation to — it may be in any location.
 #
 # The revocation half disables a live KMS key version for several minutes. Skip
