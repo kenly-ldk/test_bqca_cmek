@@ -1041,22 +1041,26 @@ Everything below runs end-to-end in a throwaway project.
 | `config/shared.env.local` | Gitignored per-workstation values (never committed) |
 | `config/_loader.py`, `scripts/prelude.sh` | Env loading with identical semantics in Python and bash |
 | `common/gda_common.py` | Endpoint resolution + the single compliance verdict, shared by Layers 4 and 5 |
-| `scripts/00_bootstrap.sh` | Production preflight: APIs, service agents, KMS key, build IAM |
-| `scripts/01_test_fixtures.sh` | Validation-only: the unapproved key and CAI export grants |
+| `scripts/00_bootstrap.sh` | Shared preflight: APIs, service agents, build IAM — resource-type agnostic |
+| `scripts/setup_agents.sh` | Part 1 setup: the key in `${LOCATION}`. `--with-fixtures` adds the validation-only unapproved key and CAI export grants |
+| `scripts/setup_conversations.sh` | Part 2 setup: the paired-region keys and the `cloudaicompanion` Data Access logs |
+| `scripts/deploy_controls.sh` | Layers 2, 4 and 5 — the shared control plane, deployed once for both resource types |
+| `scripts/deploy_agents.sh`, `scripts/deploy_conversations.sh` | The two per-resource Layer 3 deploys |
 | `layer1/policy.rego`, `policy_test.rego` | Shift-left policy and its 30 unit tests |
 | `.regal/config.yaml`, `.regal/rules/` | Regal lint config and the custom `no-regex-find-n` rule |
 | `layer1/apply_manifest.py` | Policy-gated deploy step (validate, then create) |
 | `layer1/manifests/`, `config/`, `testdata/` | Agent manifests, the KMS allowlist, fixtures |
 | `layer2/deploy.sh`, `probe.py` | Persona service accounts and the IAM behavioural probe |
-| `layer3/deploy.sh` | A datasource + a CMEK-protected agent, applied only after the Layer 1 policy passes |
+| `layer3/deploy.sh` | A datasource + a CMEK-protected agent, applied only after the Layer 1 policy passes (invoked by `scripts/deploy_agents.sh`) |
 | `layer3/create_agent.py`, `verify_cmek.py` | CMEK fixtures and the key-revocation proof |
 | `layer4/` | Remediation function, log sink, deploy script |
 | `layer5/` | Compliance scanner, BigQuery DDL and view, deploy script |
 | `layer5/revocation_proof.py` | Live proof that the CAI cross-check catches API-invisible agents |
-| `layer3/create_conversation.py`, `layer3/deploy_conversation.sh` | Layer 3 for conversations: the paired-region key gate, then a CMEK conversation per location |
+| `layer3/create_conversation.py`, `layer3/deploy_conversation.sh` | Layer 3 for conversations: the paired-region key gate, then a CMEK conversation per location (invoked by `scripts/deploy_conversations.sh`) |
 | `layer5/conversation_cmek_probe.py` | Re-measures the conversation CMEK rules — paired-region key, opt-in CMEK, the `us-east4` outage ([F8](validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location)); exits non-zero on platform drift |
 | `common/gda_common.py` | Endpoint resolution and the single compliance verdict |
 | `tests/run_layer{1,2,3,4,5}.sh` | Per-layer gates |
+| `tests/run_agents.sh`, `tests/run_conversations.sh` | The two per-resource suites, each running its layers in dependency order |
 | `tests/unit/`, `tests/run_unit.sh` | Offline Python unit tests (113) — verdict, audit-log parsing, reconciliation matrix |
 | `.github/workflows/cmek-policy.yml` | Reference CI pipeline: unit tests + Layer 1 policy gate |
 | `scripts/99_teardown.sh` | Deletes both projects (prompts for confirmation) |
@@ -1095,26 +1099,24 @@ Copy `config/shared.env` to `config/shared.env.local` and set `PROJECT_ID`,
 
 ```bash
 # 1. Offline — no project, no credentials.
-bash tests/run_unit.sh                            # 93 Python unit tests
-bash tests/run_layer1.sh                          # policy: compile, lint, unit, gate
+OFFLINE_ONLY=1 bash tests/run_agents.sh           # unit tests + the Layer 1 policy gate
 
 # 2. Deploy the controls, then a CMEK-protected agent on top of them.
-bash scripts/00_bootstrap.sh                      # production preflight
-bash layer2/deploy.sh                             # early: IAM needs ~60-120s to propagate
-DRY_RUN=true bash layer4/deploy.sh                # shadow mode first
-bash layer5/deploy.sh
-bash layer3/deploy.sh                             # datasource + a CMEK agent, Layer 1 checked
+bash scripts/00_bootstrap.sh                      # shared preflight
+bash scripts/setup_agents.sh                      # the agents' key, in ${LOCATION}
+bash scripts/deploy_controls.sh                   # Layers 2, 4 (dry run), 5
+bash scripts/deploy_agents.sh                     # datasource + a CMEK agent, Layer 1 checked
+bash scripts/deploy_agents.sh --enforce           # after confirming the COMPLIANT verdict
 
-# 3. Add what the tests need, then test in dependency order.
-bash scripts/01_test_fixtures.sh                  # the unapproved key (tests only)
+# 3. Add what the tests need, then run the suite. It handles the Layer 4
+#    dry-run toggling its own order requires, and restores enforcing on exit.
+bash scripts/setup_agents.sh --with-fixtures      # the unapproved key (tests only)
+bash tests/run_agents.sh                          # 1 -> 3 -> 4 -> 5 -> 2
 
-bash tests/run_layer3.sh                          # Layer 4 must be in dry-run
-( source scripts/prelude.sh                       # -> enforcing
-  gcloud run services update "${FUNCTION_NAME}" --project="${PROJECT_ID}" \
-    --region="${LOCATION}" --update-env-vars=DRY_RUN=false )
-bash tests/run_layer4.sh
-bash tests/run_layer5.sh                          # incl. the key-revocation proof
-bash tests/run_layer2.sh                          # last: needs Layer 4 enforcing
+# 4. The second resource type.
+bash scripts/setup_conversations.sh               # paired-region keys + audit logs
+bash scripts/deploy_conversations.sh
+bash tests/run_conversations.sh
 
 bash scripts/99_teardown.sh                       # deletes both projects; prompts
 ```
@@ -1143,11 +1145,13 @@ fix it, and none of them are cosmetic:
 > enforcer. See
 > [validation-report F10](validation-report.md#f10-the-verification-harness-must-not-race-the-enforcer).
 
-**Re-running against an already-provisioned estate.** Layer 4 is still in
-enforcing mode from the previous run, so `tests/run_layer3.sh` will refuse to
-start. Switch it to dry-run, run Layer 3, then switch it back — each half in a
-subshell, because `prelude.sh` sets
-`set -euo pipefail` and you do not want that in an interactive shell:
+**Re-running against an already-provisioned estate.** `tests/run_agents.sh`
+handles this: Layer 4 is left enforcing from the previous run, and the suite
+switches it to dry-run for the Layer 3 gate and back afterwards, restoring
+enforcing on any exit. If you run a single gate by hand instead, you own the
+toggling — `tests/run_layer3.sh` refuses to start against an armed enforcer.
+Each half goes in a subshell, because `prelude.sh` sets `set -euo pipefail` and
+you do not want that in an interactive shell:
 
 ```bash
 ( source scripts/prelude.sh
@@ -1195,9 +1199,10 @@ a regulated environment will be at least as strict.
 
 ### Step 1 — Preflight
 
-`scripts/00_bootstrap.sh` performs 1–2 below against `${PROJECT_ID}`. It is
-production-only: the validation fixtures live in `scripts/01_test_fixtures.sh`
-and must not be run against a real project.
+`scripts/00_bootstrap.sh` and `scripts/setup_agents.sh` perform 1–2 below
+against `${PROJECT_ID}`. Both are production-only: the validation fixtures are
+behind `scripts/setup_agents.sh --with-fixtures`, which must not be run against
+a real project.
 
 1. Enable `geminidataanalytics`, **`cloudaicompanion`** and `cloudkms`.
 2. Create both service identities and grant each
@@ -1208,14 +1213,15 @@ and must not be run against a real project.
    `eu`, whose key must be in `europe` because Cloud KMS has no `eu`
    ([§4.1](#41-supported-locations-and-endpoints--mandatory)).
 4. Apply `gcp.resourceLocations` to block `global` natively.
-5. **The conversation surface.** `00_bootstrap.sh` also creates the keys that
-   surface needs, in the multi-region's *paired* region (`us` → `us-central1`,
-   `eu` → `europe-west1`). These are additional key rings, not substitutes for
-   the agent keys, and conversations cannot be hosted in `us-east4` at all. It
-   further enables **Data Access audit logs on `cloudaicompanion`**, without
-   which Layer 4 sees no conversation event at all — note that this covers the
-   whole service, including Gemini Code Assist. Create a CMEK conversation with
-   `layer3/deploy_conversation.sh`
+5. **The conversation surface**, which has its own setup script because it
+   needs different things. `scripts/setup_conversations.sh` creates the keys
+   that surface needs, in the multi-region's *paired* region (`us` →
+   `us-central1`, `eu` → `europe-west1`). These are additional key rings, not
+   substitutes for the agent keys, and conversations cannot be hosted in
+   `us-east4` at all. It further enables **Data Access audit logs on
+   `cloudaicompanion`**, without which Layer 4 sees no conversation event at
+   all — note that this covers the whole service, including Gemini Code Assist.
+   Create a CMEK conversation with `scripts/deploy_conversations.sh`
    ([F8](validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location)).
 
 ### Step 2 — Deploy guardrails
