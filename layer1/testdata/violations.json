@@ -6,7 +6,7 @@
     { "id": "global-agent", "location": "global",
       "kms_key": "projects/example-kms-prod/locations/global/keyRings/kr/cryptoKeys/k" },
     { "id": "mismatched-key-agent", "location": "us-east4",
-      "kms_key": "projects/example-kms-prod/locations/eu/keyRings/kr/cryptoKeys/k" },
+      "kms_key": "projects/example-kms-prod/locations/europe/keyRings/kr/cryptoKeys/k" },
     { "id": "malformed-key-agent", "location": "us-east4", "kms_key": "some-key-name" }
   ]
 }

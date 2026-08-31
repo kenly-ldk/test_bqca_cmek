@@ -8,13 +8,13 @@ CREATE TABLE IF NOT EXISTS `${PROJECT_ID}.${BQ_DATASET}.${INVENTORY_TABLE}`
 (
   scan_time          TIMESTAMP NOT NULL OPTIONS(description="UTC time of the scan run"),
   -- DATA_AGENT: one row per agent.
-  -- CONVERSATION_KEY: one row per project+location. CMEK for conversations is a
-  -- project+location singleton (the API rejects any second key, even one in the
-  -- same project), so there is nothing per-conversation to inventory —
-  -- conversations are ephemeral and never provisioned. The control is a single
-  -- attestation of the registered key. See common/gda_common.attest_conversation_key.
+  -- CONVERSATION_KEY: one row per project+location, summarising every
+  -- conversation in it. CMEK on a conversation is real but opt-in per
+  -- conversation, so all of them are read and the location fails if any one is
+  -- unkeyed; the row is a summary because conversations are ephemeral and
+  -- hard-deleted. See common/gda_common.evaluate_conversation_compliance.
   resource_type      STRING    OPTIONS(description="DATA_AGENT | CONVERSATION_KEY"),
-  resource_url       STRING    NOT NULL OPTIONS(description="agent path, or the conversations collection for an attestation"),
+  resource_url       STRING    NOT NULL OPTIONS(description="agent path, or the conversations collection for a per-location verdict"),
   project_id         STRING,
   location           STRING,
   agent_id           STRING,

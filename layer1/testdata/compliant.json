@@ -8,7 +8,7 @@
     {
       "id": "retail-insights-agent",
       "location": "eu",
-      "kms_key": "projects/example-kms-shared/locations/eu/keyRings/analytics-kr/cryptoKeys/agent-key"
+      "kms_key": "projects/example-kms-shared/locations/europe/keyRings/analytics-kr/cryptoKeys/agent-key"
     }
   ]
 }

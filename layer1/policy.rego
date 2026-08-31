@@ -53,7 +53,22 @@ approved_kms_projects := projects if {
 
 # Locations where the API can actually attach a CMEK key. `global` cannot, so an
 # agent placed there is unencryptable by construction, key or no key.
-supported_locations := {"us-east4", "us", "eu"}
+# Derived from required_key_location, never written out separately: a location
+# is supported precisely when we know which KMS location its key belongs in,
+# and two hand-maintained lists would eventually disagree.
+supported_locations := object.keys(required_key_location)
+
+# METADATA
+# title: required_key_location
+# description: |
+#   The Cloud KMS location a DataAgent's key must live in, per agent location.
+#   Same string as the agent location everywhere except `eu`: Cloud KMS has no
+#   `eu` location at all, only `europe`, so the "co-located" rule is
+#   unsatisfiable as literally stated and `europe` is what the API accepts
+#   (validation-report F6). Keyed on the agent location, so an agent in an
+#   unsupported location matches nothing here and is caught by the unsupported
+#   location rule instead.
+required_key_location := {"us-east4": "us-east4", "us": "us", "eu": "europe"}
 
 # METADATA
 # title: allow
@@ -112,17 +127,31 @@ deny contains msg if {
 
 # METADATA
 # title: Key location mismatch
-# description: The key must be co-located with the agent, or creation fails at the API.
+# description: |
+#   The key must sit in the KMS location the API demands for the agent's
+#   location, or creation fails at the API.
+#
+#   That is NOT always the same string as the agent's location, which is why
+#   this compares against a map rather than testing equality. Cloud KMS has no
+#   `eu` location — its EU multi-region is `europe` — so an `eu` agent takes a
+#   `europe` key, verified accepted against the live API (validation-report F6).
+#   A plain equality test denies every deployable `eu` agent, because the key it
+#   demands cannot exist.
+#
+#   Conversations follow a different rule again (paired region: `us-central1`,
+#   `europe-west1`) and are not covered here — they are rejected outright by the
+#   conversations rule below.
 deny contains msg if {
 	some agent in input.agents
 	agent.kms_key
+	required := required_key_location[agent.location]
 
 	key_loc := kms_key_location(agent.kms_key)
-	key_loc != agent.location
+	key_loc != required
 
 	msg := sprintf(
-		"REJECTED [Key Location Mismatch]: agent '%v' is in '%v' but its key is in '%v'.",
-		[agent.id, agent.location, key_loc],
+		"REJECTED [Key Location Mismatch]: agent '%v' is in '%v', so its key must be in '%v', but it is in '%v'.",
+		[agent.id, agent.location, required, key_loc],
 	)
 }
 
@@ -147,17 +176,24 @@ deny contains msg if {
 #   per user session and discarded. They have no place in a CI/CD manifest, and
 #   this rule makes that structural rather than conventional.
 #
-#   There is also nothing to provision. Verified against the live API: CMEK for
-#   conversations is a project+location SINGLETON — supplying any key other than
-#   the registered one is rejected, including a different key in the same
-#   project ("Only 1 KMS keys per project per location are allowed"). So a
-#   manifest could not choose a conversation's key even if it wanted to; the key
-#   is a property of the project, attested once by Layer 5, not a property of
-#   each conversation.
+#   A conversation CAN carry a CMEK key — that is measured, and it is a real
+#   boundary (validation-report F8, re-measured 2026-08-30). But the key is
+#   chosen by whoever calls CreateConversation at runtime, not by a pipeline:
+#   CMEK is opt-in per conversation, and an unkeyed conversation does not
+#   inherit the key registered for its project+location. A manifest cannot
+#   reach that decision, so declaring a conversation here would pin nothing
+#   while looking like it had.
 #
-#   A manifest that declares conversations therefore reflects a
-#   misunderstanding of the model, and silently ignoring the block would let a
-#   pipeline believe it had pinned something it had not.
+#   Two further reasons this must deny rather than warn. The key location
+#   differs from the agent rule — a conversation in `us` needs a key in
+#   `us-central1`, an agent in `us` needs one in `us` — so rule 4 below would
+#   judge a conversation entry by the wrong standard. And offering a key to
+#   CreateConversation is a permanent, unprivileged write: the first key
+#   submitted is registered for the whole project+location even if the create
+#   fails, and the slot can never be reassigned. A pipeline that retries a
+#   conversation manifest could burn that slot on a mistake, once, forever.
+#
+#   Layer 5 covers this surface instead, by reporting every conversation's key.
 deny contains msg if {
 	some i, conv in input.conversations
 
@@ -165,8 +201,8 @@ deny contains msg if {
 		concat("", [
 			"REJECTED [Conversations Not Provisionable]: entry %v ('%v') — ",
 			"conversations are ephemeral runtime resources and must not be ",
-			"declared in a manifest. CMEK for conversations is a ",
-			"project+location singleton; attest it with Layer 5 instead.",
+			"declared in a manifest. Their CMEK key is chosen per conversation ",
+			"at runtime, not by a pipeline; Layer 5 reports that posture instead.",
 		]),
 		[i, object.get(conv, "id", "<no id>")],
 	)

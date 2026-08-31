@@ -104,13 +104,17 @@ test_deny_arbitrary_unsupported_region if {
 	contains(msg, "Unsupported Location")
 }
 
+# Each agent here uses the key location the API actually demands for it, so a
+# deployable agent in any supported location must clear the WHOLE policy — not
+# merely the location rule. An earlier version asserted only "Unsupported
+# Location" and gave the `eu` agent a key at locations/eu; that key cannot exist
+# in Cloud KMS, and asserting the narrower thing hid the fact that rule 4 denied
+# every real `eu` agent. See validation-report F6.
 test_supported_locations_not_flagged if {
-	every msg in cmek.deny {
-		not contains(msg, "Unsupported Location")
-	} with input as {"agents": [
+	cmek.allow with input as {"agents": [
 		{"id": "a", "location": "us-east4", "kms_key": good_key},
 		{"id": "b", "location": "us", "kms_key": "projects/example-kms-prod/locations/us/keyRings/kr/cryptoKeys/k"},
-		{"id": "c", "location": "eu", "kms_key": "projects/example-kms-prod/locations/eu/keyRings/kr/cryptoKeys/k"},
+		{"id": "c", "location": "eu", "kms_key": "projects/example-kms-prod/locations/europe/keyRings/kr/cryptoKeys/k"},
 	]}
 }
 
@@ -120,7 +124,7 @@ test_deny_key_location_mismatch if {
 	some msg in cmek.deny with input as {"agents": [{
 		"id": "mismatch",
 		"location": "us-east4",
-		"kms_key": "projects/example-kms-prod/locations/eu/keyRings/kr/cryptoKeys/k",
+		"kms_key": "projects/example-kms-prod/locations/europe/keyRings/kr/cryptoKeys/k",
 	}]}
 	contains(msg, "Key Location Mismatch")
 }
@@ -129,6 +133,51 @@ test_no_mismatch_when_colocated if {
 	every msg in cmek.deny {
 		not contains(msg, "Key Location Mismatch")
 	} with input as {"agents": [compliant_agent]}
+}
+
+# Cloud KMS has no `eu` location — its EU multi-region is `europe` — so an `eu`
+# agent takes a `europe` key and the API accepts it. Equality between the two
+# strings is therefore the wrong test, and this is the case that proves it.
+test_eu_agent_with_a_europe_key_is_allowed if {
+	every msg in cmek.deny {
+		not contains(msg, "Key Location Mismatch")
+	} with input as {"agents": [{
+		"id": "eu-agent",
+		"location": "eu",
+		"kms_key": "projects/example-kms-prod/locations/europe/keyRings/kr/cryptoKeys/k",
+	}]}
+}
+
+# The corollary: the key path that "co-located" literally asks for cannot exist,
+# so it must be denied rather than waved through.
+test_eu_agent_with_an_eu_key_is_denied if {
+	some msg in cmek.deny with input as {"agents": [{
+		"id": "eu-agent",
+		"location": "eu",
+		"kms_key": "projects/example-kms-prod/locations/eu/keyRings/kr/cryptoKeys/k",
+	}]}
+	contains(msg, "Key Location Mismatch")
+}
+
+# `europe` is right for an `eu` agent and wrong for every other location.
+test_europe_key_rejected_for_a_us_agent if {
+	some msg in cmek.deny with input as {"agents": [{
+		"id": "us-agent",
+		"location": "us",
+		"kms_key": "projects/example-kms-prod/locations/europe/keyRings/kr/cryptoKeys/k",
+	}]}
+	contains(msg, "Key Location Mismatch")
+}
+
+# A conversation's paired-region key is not valid on an agent: an agent in `us`
+# needs a key in `us`, not `us-central1` (validation-report F8).
+test_conversation_paired_region_key_rejected_for_an_agent if {
+	some msg in cmek.deny with input as {"agents": [{
+		"id": "us-agent",
+		"location": "us",
+		"kms_key": "projects/example-kms-prod/locations/us-central1/keyRings/kr/cryptoKeys/k",
+	}]}
+	contains(msg, "Key Location Mismatch")
 }
 
 # --- rule 5: malformed key path ---------------------------------------------
@@ -162,13 +211,33 @@ test_no_malformed_for_valid_path if {
 
 test_all_applicable_rules_report if {
 	msgs := cmek.deny with input as {"agents": [{
-		"id": "global-rogue",
-		"location": "global",
-		"kms_key": "projects/attacker-proj/locations/eu/keyRings/kr/cryptoKeys/k",
+		"id": "us-rogue",
+		"location": "us",
+		"kms_key": "projects/attacker-proj/locations/europe/keyRings/kr/cryptoKeys/k",
 	}]}
 
-	# unapproved project + unsupported location + location mismatch
-	count(msgs) == 3
+	# unapproved project + location mismatch, both reported
+	count(msgs) == 2
+	some m1 in msgs
+	contains(m1, "Unauthorized KMS Project")
+	some m2 in msgs
+	contains(m2, "Key Location Mismatch")
+}
+
+# An agent in an unsupported location gets ONE finding, not two. There is no
+# correct KMS location for `global` — no key works there by any route (F6) — so
+# "your key is in the wrong place" is noise on top of "this location can never
+# be encrypted", and it would imply a fix that does not exist.
+test_unsupported_location_does_not_also_report_a_mismatch if {
+	msgs := cmek.deny with input as {"agents": [{
+		"id": "global-agent",
+		"location": "global",
+		"kms_key": "projects/example-kms-prod/locations/us-east4/keyRings/kr/cryptoKeys/k",
+	}]}
+
+	count(msgs) == 1
+	some m in msgs
+	contains(m, "Unsupported Location")
 }
 
 # --- malformed manifest -----------------------------------------------------
@@ -210,9 +279,10 @@ test_allow_empty_agents_array_still if {
 
 # --- conversations are never provisionable ----------------------------------
 #
-# Conversations are ephemeral runtime resources, and their CMEK key is a
-# project+location singleton rather than a per-resource field, so a manifest
-# can neither meaningfully declare one nor choose its key.
+# Conversations are ephemeral runtime resources whose CMEK key is chosen per
+# conversation at runtime (validation-report F8), so a manifest can neither
+# meaningfully declare one nor choose its key — and offering a key is a
+# permanent write, so a retrying pipeline must never be able to try.
 
 test_deny_top_level_conversations if {
 	count(cmek.deny) > 0 with input as {

@@ -1,0 +1,15 @@
+# Dependencies for scripts/repro_conversation_cmek.py — deliberately minimal so
+# the reproduction can be handed to someone outside this repo and just run.
+#
+#   pip install -r scripts/requirements-repro.txt
+#
+# Note what is NOT here: google-cloud-geminidataanalytics. The script talks raw
+# REST on purpose, so the result cannot be dismissed as a client-library
+# artefact, and so it stays runnable when the SDK version moves.
+#
+# Also required, but not installable with pip:
+#   * the `gcloud` CLI, on PATH and authenticated
+#   * Application Default Credentials (`gcloud auth application-default login`)
+
+google-auth>=2.0
+requests>=2.25

@@ -56,7 +56,7 @@ def inject(monkeypatch):
     def _inject(cai: dict, api: dict, failed: dict | None = None):
         monkeypatch.setattr(scanner, "scan_cai", lambda: cai)
         monkeypatch.setattr(scanner, "scan_api", lambda: (api, failed or {}))
-        # build_rows also appends conversation-key attestations. Stub them out:
+        # build_rows also appends conversation verdict rows. Stub them out:
         # these tests are about the agent matrix, and an un-stubbed scan would
         # reach the live API and stop being a unit test. Conversation rows are
         # covered in test_conversations.py.

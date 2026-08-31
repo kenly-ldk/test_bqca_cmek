@@ -158,7 +158,25 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-log "7. Conversation key attestation (one row per project+location)"
+log "7. Conversation CMEK: the platform still behaves the way F8 records"
+# The conversation verdict rests on three measured behaviours, none of them
+# documented: the key must be in the multi-region's paired region, CMEK is
+# opt-in per conversation, and us-east4 cannot host a conversation at all
+# (validation-report F8). This gate is drift detection over those three — if any
+# changes, the verdict in common/gda_common.py is measuring the wrong thing and
+# F8 has to be re-validated.
+#
+# --revocation is deliberately NOT passed: it disables a live KMS key version
+# for up to nine minutes. Run it by hand when re-validating F8.
+RC=0; python -m layer5.conversation_cmek_probe || RC=$?
+case "${RC}" in
+  0) check "conversation CMEK posture unchanged" 0 "paired-region key rule, opt-in CMEK and the us-east4 outage all still hold" ;;
+  2) printf '  [ERROR] conversation CMEK probe INCONCLUSIVE — could not run; re-run\n'
+     FAILED=1 ;;
+  *) check "conversation CMEK posture unchanged" 1 "platform drift — re-validate F8" ;;
+esac
+
+log "8. Conversation compliance (one row per project+location, over all conversations)"
 bq --project_id="${PROJECT_ID}" query --use_legacy_sql=false --location="${BQ_LOCATION}" \
   "SELECT location, compliance_status, verification_state, kms_key_project
    FROM ${BQ_DATASET}.${COMPLIANCE_VIEW}

@@ -23,24 +23,35 @@ and compliance function.
 
 | Layer | Verdict | What produces it |
 | :--- | :--- | :--- |
-| 1 — CI/CD policy-as-code | **PASS** 14/14 | `tests/run_layer1.sh`; Rego v1 policy, Regal-linted, 30 policy unit tests, gated deploy step |
+| 1 — CI/CD policy-as-code | **PASS** 14/14 | `tests/run_layer1.sh`; Rego v1 policy, Regal-linted, 35 policy unit tests, gated deploy step |
 | 2 — IAM least privilege | **PASS** 45/45 | `tests/run_layer2.sh`; 45-cell persona × operation matrix executed live under impersonation |
 | 3 — CMEK at rest | **PASS** 6/6 | `tests/run_layer3.sh`; proven by key revocation, not field inspection |
 | 4 — Real-time remediation | **PASS** 7/7 | `tests/run_layer4.sh`; 13–30 s detect → redact → soft-delete across six runs |
 | 5 — Continuous compliance | **PASS** | `tests/run_layer5.sh`; two reconciled sources, proven by a live key-revocation proof |
 
-Cutting across all five, **`tests/run_unit.sh` passes 93/93** offline, with no
+Cutting across all five, **`tests/run_unit.sh` passes 96/96** offline, with no
 GCP project: the shared compliance verdict, the enforcer's audit-log parsing and
 every quadrant of the scanner's reconciliation matrix. It is not a layer — it is
 the unit suite for the logic the layers share.
+
+> **These verdicts are about DataAgents.** The other resource type carrying
+> customer content — **Conversations** — is invisible to the Layer 4 sink and to
+> Cloud Asset Inventory, and is governed by different rules throughout. CMEK
+> **does** hold on conversation content, but only with a key in the
+> multi-region's paired region (`us` → `us-central1`, `eu` → `europe-west1`),
+> which is not the location Google documents; and it is **opt-in per
+> conversation**, so a registered key protects nothing until each caller asks
+> for it. `us-east4` cannot host a conversation at all. Read
+> [F8](#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location)
+> before presenting this report as covering the GDA surface.
 
 | Environment | |
 | :--- | :--- |
 | Workload project | purpose-created, disposable (`WORKLOAD_PROJECT` below) |
 | Unapproved-KMS project | purpose-created, holds only an out-of-allowlist key (`ROGUE_PROJECT`) |
 | Organization | Google Cloud sandbox org with common guardrail policies enforced |
-| Location | `us-east4` and `us`, plus `global` as a negative control |
-| Approved key | `projects/WORKLOAD_PROJECT/locations/us-east4/.../cryptoKeys/agent-key`, with a `us` counterpart |
+| Location | `us-east4`, `us` and `eu`, plus `global` as a negative control |
+| Approved key | `projects/WORKLOAD_PROJECT/locations/us-east4/.../cryptoKeys/agent-key`, with `us` and `europe` counterparts |
 | Unapproved key | `projects/ROGUE_PROJECT/locations/us-east4/.../cryptoKeys/rogue-key` |
 
 Agent IDs in the evidence below carry a run-scoped numeric suffix, because soft
@@ -240,11 +251,52 @@ treat every `global` agent as a violation on sight.
 
 **Scope of what was exercised:** every *compliant* CMEK agent in the original
 validation ran in `us-east4`, and `global` was exercised as a negative control on
-every Layer 4 run. `us` was measured subsequently — a key-bearing agent was
-created successfully in the multi-region — so `us-east4` and `us` are both
-measured. **`eu` is in the API's documented CMEK set and is swept by the Layer 5
-scanner, but no key-bearing agent was created there: treat it as documented
-rather than measured.**
+every Layer 4 run. `us` and `eu` were both measured during the conversations
+work — a key-bearing agent was created successfully in each — so all three CMEK
+locations are measured rather than documented.
+
+**`eu` needs a `europe` key, not an `eu` one.** Cloud KMS has no `eu` location —
+its EU multi-region is `europe` — so the obvious key path for an `eu` agent does
+not exist, and asking for one fails with a misleading `NOT_FOUND: The request
+concerns location 'eu' but was sent to location 'europe'`, which reads like a
+client bug. A `europe` key **is** accepted for an `eu` agent by the API. The same
+same mismatch bites differently on the conversation surface, which does not want
+a same-location key at all: an `eu` conversation needs a key in `europe-west1`,
+and an `eu` agent needs one in `europe`. Two resource types, two KMS locations,
+one documented rule covering both — see F8.
+
+**This broke the Layer 1 gate, and the gate's own tests hid it.** Rule 4
+(*Key Location Mismatch*) tested the key location for equality with the agent
+location, so a real `eu` agent was rejected before it ever reached the API:
+
+```
+$ opa eval -d layer1/policy.rego -i eu-agent.json 'data.gda.cmek.deny'
+[
+  "REJECTED [Key Location Mismatch]: agent 'eu-agent' is in 'eu' but its key is in 'europe'."
+]
+```
+
+`test_supported_locations_not_flagged` passed only because its `eu` fixture used
+a key at `locations/eu`, which cannot exist in Cloud KMS, and because it
+asserted only that no *Unsupported Location* message fired rather than that the
+manifest was allowed. `layer1/testdata/compliant.json` carried the same
+impossible key path, so the fixture the pipeline treats as its reference for
+"compliant" described an agent that could never be deployed.
+
+**Fixed.** Rule 4 now resolves the required KMS location through a map,
+`required_key_location := {"us-east4": "us-east4", "us": "us", "eu": "europe"}`,
+and `supported_locations` is derived from that map's keys so the two cannot
+drift apart. The fixtures use `europe`, and
+`test_supported_locations_not_flagged` now asserts `allow` over the whole
+policy, so a deployable agent in any supported location has to clear every rule
+rather than one. Re-verified against the live API on 2026-08-30: an `eu` agent
+with a `europe` key is created and reads back carrying that key, while the same
+agent with a `locations/eu` key fails with the `404` above.
+
+One deliberate behaviour change came with it: an agent in an **unsupported**
+location no longer also draws a *Key Location Mismatch*. There is no correct KMS
+location for `global`, so naming one would imply a fix that does not exist;
+*Unsupported Location* is the whole finding.
 
 ### F7. The cloudaicompanion service must be enabled
 
@@ -254,17 +306,207 @@ and its service agent
 `cryptoKeyEncrypterDecrypter` on every key. The service agent does not exist
 until the API is enabled, so this is a bootstrap ordering requirement.
 
-### F8. Conversations are a second CMEK surface, governed differently
+### F8. Conversation CMEK works, but only with an undocumented key location
 
-Conversations are not data agents and the agent controls do not cover them:
+Conversations are not data agents, and the agent controls do not cover them.
+This finding has been measured three times and the middle reading was wrong, so
+the history matters as much as the result:
 
-* **The conversation CMEK key is a singleton per project + location** — not per
-  resource. The API rejects any second key, including another key in the same
-  project. Verified: a foreign key and a same-project-other key are both
-  `REJECTED_BY_KMS_PIN`. This is *stricter* than
-  `restrictCmekCryptoKeyProjects`. Supplying **no** key is still accepted, which
-  is the residual gap. There is therefore nothing per-conversation to enforce:
-  the control is an attestation of the one registered key.
+| Measured | Reading | Status |
+| :--- | :--- | :--- |
+| 2026-08-21 | The conversation key is a protective "project+location singleton" | Wrong — the pin is real but protects nothing by itself |
+| 2026-08-27 | CMEK cannot be attached to a conversation in any location | **Wrong — withdrawn** |
+| 2026-08-30 | CMEK attaches and holds, with the key in the multi-region's **paired region** | Current |
+
+The 2026-08-27 measurement failed for a real reason, but not the one it
+recorded. Every attempt supplied the key path the documentation prescribes — a
+key in the *same location as the conversation* — and that path is rejected in
+every location. The conclusion drawn from it ("the feature is unreachable") did
+not survive trying a key path the documentation never mentions.
+
+**The rule the API actually implements.** A conversation in a GDA multi-region
+takes a key in that multi-region's paired primary region, and in nothing else.
+Probed by submitting a candidate key and reading which rejection comes back —
+`KMS key must be in the same location as parent` means the location was refused,
+`Only 1 KMS keys per project per location` means the location was accepted and
+the request then hit the key registry. Neither outcome writes anything, and the
+key need not exist, because the location check fires first:
+
+| Conversation parent | KMS location accepted | KMS locations refused |
+| :--- | :--- | :--- |
+| `us` | **`us-central1`** — and only this | `us-east1`, `us-east4`, `us-east5`, `us-west1..4`, `us-south1`, `northamerica-northeast1`, `nam4`, `global`, and **`us`** |
+| `eu` | **`europe-west1`** — and only this | `europe-west2/3/4/9`, `europe-north1`, `europe-central2`, `eur3`, `us-central1`, `global`, and **`europe`** |
+
+Thirteen KMS locations were probed for `us` and eleven for `eu`. Exactly one is
+accepted in each case. This is not "any regional key": every other region on the
+same continent is refused with the same message as a key on the wrong continent.
+
+**"Parent" is the project and location, not the agent.** The error text says the
+key must match the *parent*, and a conversation's parent is
+`projects/PROJECT/locations/LOCATION` — where the conversation itself is
+created. It is **not** the agent the conversation references; the agent is a
+field in the request body (`agents[]`) and plays no part in the key rule.
+
+Measured, holding the conversation in `us` and varying everything else:
+
+| `parent` | `agents[0]` | `kms_key` | Result |
+| :--- | :--- | :--- | :--- |
+| `.../locations/us` | agent in `us` | `us-central1` | created |
+| `.../locations/us` | agent in **`eu`** | `us-central1` | **created** — follows the parent |
+| `.../locations/us` | agent in **`eu`** | `europe-west1` | **rejected**, same location message |
+| `.../locations/us` | agent in `us` / `eu` / `us-east4` | none | created in all three cases |
+
+Two consequences. A `us-east4` agent is still usable conversationally even
+though `us-east4` cannot host a conversation — host the conversation in `us`.
+And an agent's `kms_key` and a conversation's `kms_key` are independent fields
+on independent resources: the anchor agents in this project carry no key while
+the conversations they serve carry one, so a CMEK-protected agent does not imply
+CMEK-protected conversations.
+
+**The documented configuration fails 100% of the time.** The
+[CMEK page](https://docs.cloud.google.com/gemini/data-agents/conversational-analytics-api/cmek)
+states plainly that *"The Cloud KMS key and the Conversational Analytics API
+resource must be in the same location"* and *"A CMEK key must be in the same
+region as the resource that it protects"*, and its sample body interpolates a
+single `{location}` into both the conversation parent and the key path:
+
+```python
+conversation_payload = {
+    "agents": [f"projects/{billing_project}/locations/{location}/dataAgents/{data_agent_id}"],
+    "name":   f"projects/{billing_project}/locations/{location}/conversations/{conversation_id}",
+    "kms_key": f"projects/{key_project}/locations/{location}/keyRings/{key_ring_name}/cryptoKeys/{key_name}",
+}
+```
+
+For a `us` conversation that yields a key in `us`, which the API refuses. The
+paired region is documented nowhere on the page. **Anyone following the
+documentation exactly will conclude the feature is broken** — which is precisely
+what happened here on 2026-08-27. The defect is now a documentation and
+API-contract mismatch rather than a missing capability, but it is still a defect
+worth raising, and it is the reason this finding was wrong for three days.
+
+**The boundary is real.** The key is not a stored string. Measured in a fresh
+project with a keyless conversation as a control, both loaded with real content
+(ten messages: the generated SQL, the BigQuery job reference and the returned
+customer rows), then key version 1 disabled:
+
+| | `us`, key in `us-central1` | `eu`, key in `europe-west1` |
+| :--- | :--- | :--- |
+| baseline | 10 messages readable | 10 messages readable |
+| key disabled | **blocked at t+5min** | **blocked at t+2min** |
+| keyless control conversation | readable throughout | readable throughout |
+
+`GetConversation` and `ListMessages` both fail, and the error names the
+mechanism:
+
+```
+failed to enumerate messages in InteractionHistoryService: generic::failed_precondition:
+fetch message from Firestore: rpc error: code = FailedPrecondition desc = The
+customer-managed encryption key required by the requested resource is not accessible.
+```
+
+The key was independently confirmed unusable during the window (`gcloud kms
+encrypt` returned `FAILED_PRECONDITION ... KEY_DISABLED`), so this is revocation
+taking effect, not an unrelated outage. Conversation message content — the
+questions, the generated SQL and the returned rows — is genuinely
+crypto-shreddable.
+
+**A keyless conversation is not covered by the registered key.** This is the
+governance point that matters most, and it is the reverse of what a "one key per
+project per location" registry suggests. In a project + location where a key
+*is* registered, a conversation created without `kms_key` comes back with
+`kmsKey` unset and **stays fully readable while the registered key is disabled**
+— that is the control row in the table above. CMEK is therefore **opt-in per
+conversation**, not a property of the project + location. The registry decides
+*which* key may be used; each caller decides *whether* to use one.
+
+Two consequences follow. There **is** per-conversation drift to chase, so the
+conversation surface needs an inventory rather than a single attestation. And a
+project can hold a correctly registered, correctly permissioned key while every
+conversation in it is unencrypted, with nothing in the key's own configuration
+to reveal that.
+
+**`us-east4` still cannot create a conversation at all.** Unchanged from the
+2026-08-27 reading and re-measured in the new project: **0 of 13** keyless
+`CreateConversation` attempts succeeded, against a confirmed-existing anchor
+agent, with `FailedPrecondition: Invalid resource state for "conversation":
+failed to create conversation` every time. This is not a CMEK defect — it is the
+conversation surface being unavailable in the region, which takes CMEK down with
+it. `us` in the same project was 10/10 on the same request shape.
+
+**That error string is generic — do not read it as a regional outage.** The same
+`Invalid resource state for "conversation"` message appeared transiently in `us`
+immediately after a KMS key version was re-enabled (two failures, then success on
+an identical request), while keyless creates in `us` were 10/10 in the same
+period. It means "the conversation could not be created", including "the key is
+not usable right now". Only its persistence across repeated attempts
+distinguishes the `us-east4` outage from a key-state transient, which is why both
+probes retry before concluding anything.
+
+**The one-key-per-project-per-location registry is real, and now matters more.**
+Confirmed independently of the earlier reading: submitting a *different* key in
+the accepted location — including a key that does not exist — returns
+
+```
+Invalid resource state for "conversation.kms_key_name": Cannot add a new KMS key.
+Only 1 KMS keys per project per location are allowed.
+```
+
+The squatting analysis from the previous reading stands unchanged, and its
+consequences are worse now that the key does real work:
+
+* **Offering a key is a permanent, unprivileged write.** The first key submitted
+  is registered even when the create then fails. Anyone who can call
+  `CreateConversation` can permanently pin a project + location to a key of
+  their choosing — including a key in a project they control, since they can
+  grant the victim's service agent on it — and `topics.create` comes free with
+  `bigquery.studioUser` (below).
+* **The registered key cannot be replaced, even once it is useless.** Rotating
+  the key *version* is fine: the registry pins the `cryptoKey`, not the version,
+  and a new primary version is accepted. Changing the *key* is impossible, and
+  disabling every version does not free the slot. A project + location can be
+  pinned permanently to a key that no longer works — and now that the key
+  genuinely encrypts, that pin can render the whole surface unusable rather than
+  merely untidy.
+
+**DataAgent and Conversation have opposite key-location rules.** Same project,
+same endpoint, same key ring name — and the two resource types disagree about
+where the key must live:
+
+| Resource in `us` | key in `us` | key in `us-central1` |
+| :--- | :--- | :--- |
+| `DataAgent` | **accepted** | rejected, HTTP 400 |
+| `Conversation` | rejected, HTTP 400 | **accepted** |
+
+A `us-east4` agent takes a `us-east4` key; an `eu` agent rejects a
+`europe-west1` key and needs one in `europe` (F6). So an estate running agents
+and conversations in the same multi-region needs **two** key rings in **two**
+KMS locations to cover both, and neither key covers the other resource type.
+Nothing in the documentation distinguishes the two rules; the page presents one
+same-location rule for both.
+
+The remaining conversation behaviours are unchanged from the previous reading and
+were re-confirmed:
+
+* **The lifecycle is audited only as Data Access, under a different service.**
+  `CreateConversation`, `GetConversation`, `ListConversations` and
+  `DeleteConversation` emit nothing under `geminidataanalytics.googleapis.com`.
+  They appear as `cloudaicompanion.v1.TopicService.CreateTopic` / `GetTopic` /
+  `FindReadableTopics` / `DeleteTopic` — in
+  `cloudaudit.googleapis.com/data_access`, which is **off by default** and has
+  to be enabled per service. Even then the entries carry `request: null`,
+  `response: null` and `authorizationInfo: null`: no key, no agent, no content.
+  The `resourceName` is a *topic*, and it is recorded in `us-central1` for a
+  conversation created in `us`. **Layer 4 can never cover conversations**: its
+  sink filters `serviceName="geminidataanalytics"` and
+  `methodName=~"CreateDataAgent"`, and widening it would not help, because there
+  is no key in the payload to classify.
+* **Delete is a hard delete** — the opposite of `DeleteDataAgent` (F1).
+  Immediately after `DeleteConversation`: `GetConversation` returns `NotFound`,
+  `ListMessages` returns `NotFound`, the conversation is absent from
+  `ListConversations`, and **the ID is immediately reusable**. There is no
+  tombstone and no purge window, so conversation IDs do not need to be
+  run-scoped the way agent IDs do.
 * **Access is gated by `cloudaicompanion.topics.*`, not by any
   `geminidataanalytics` permission.** None of the nine GDA roles can create a
   conversation. The minimum viable custom role is `topics.create` +
@@ -284,8 +526,50 @@ Conversations are not data agents and the agent controls do not cover them:
   per-principal lever is an IAM deny policy, which requires org- or
   folder-level `denyAdmin`.
 
-The practical containment is to dedicate projects to agents and conversations
-and let the CMEK attestation be the backstop.
+**Consequence for the framework.** Conversation content *can* be brought under
+CMEK governance, so Layer 5 attests a real protection rather than reporting an
+exposure. Three things follow from *how* it works:
+
+1. **Report per conversation, not per project + location.** Because CMEK is
+   opt-in per conversation, one keyed conversation says nothing about the next
+   one. The scanner reads the key off every conversation it can list and reports
+   the location non-compliant if *any* of them is unkeyed.
+2. **The right key is the paired region.** `us` → `us-central1`, `eu` →
+   `europe-west1`. An estate that provisions keys by copying the agent-side
+   convention will register the wrong key, and — because the first key offered
+   is permanent — will not get a second attempt.
+3. **The residual exposure is real but bounded.** Layer 4 still cannot see
+   conversations, the lifecycle is invisible unless Data Access logs are enabled
+   on `cloudaicompanion.googleapis.com`, and `us-east4` cannot host them at all.
+   Containment is still partly non-cryptographic: dedicate projects to agents and
+   conversations, and rely on hard delete for the content's short life.
+
+**What to raise with Google.** Two distinct defects, neither of which is "the
+feature does not work":
+
+1. **The documented key location is wrong, and the working one is undocumented.**
+   The page requires the key to share the resource's location and demonstrates
+   exactly that in its sample. That configuration is rejected in every supported
+   location. The rule the API implements — the multi-region's paired primary
+   region, `us-central1` for `us` and `europe-west1` for `eu` — appears nowhere.
+   The page also gives one same-location rule for both resource types, while
+   `DataAgent` and `Conversation` in fact require keys in different locations.
+2. **`us-east4` cannot create a conversation at all**, with or without a key,
+   despite being listed as a supported location.
+
+**`scripts/repro_conversation_cmek.py` is the artefact to attach to that
+report.** It is standalone, takes `--project`, provisions every documented
+prerequisite with `--setup`, and *verifies* each one before attempting anything,
+so "the setup was wrong" can be excluded before "the platform is broken" is
+proposed. For each attempt it prints the request body, the verbatim response and
+a replayable `curl` line, and it tries the documented key path and the paired
+region side by side so the difference between them is the output rather than the
+conclusion. `--revocation` adds the proof that the key holds and that a keyless
+conversation in the same location does not.
+
+`layer5/conversation_cmek_probe.py` re-measures this posture on demand and exits
+non-zero if the platform stops matching it — including if the documented key
+path *starts* working, which is what a fix would look like.
 
 ### F9. A partial read must never become a confident verdict
 
@@ -336,7 +620,17 @@ redacted tombstone retained for 30 days**. Disclose both the exposure window and
 the residual retention to risk and compliance.
 
 **This covers DataAgents only.** The table above, and every number in it, is
-about agents. Do not let them be read as covering any other resource type.
+about agents. Conversations — the questions, the generated SQL and the returned
+rows — sit outside all of it. They *can* be CMEK-encrypted, but only with a key
+in the paired region and only when the caller opts in per conversation; the
+enforcer cannot see them, and Cloud Asset Inventory cannot enumerate them (F8).
+So the agent-side guarantee is "non-compliant for 13–30 s, then neutralised",
+while the conversation-side guarantee is "protected if it was created with a
+key, and reported hourly by Layer 5 if it was not" — there is no remediation
+path at all. Their one favourable property is that `DeleteConversation` is a
+**hard** delete, so unlike an agent there is no 30-day readable tombstone and no
+residual retention to disclose. Do not let the agent-side numbers be read as
+covering the conversation surface; state the two separately.
 
 Two mitigations reduce the exposure rather than eliminate it, and both are
 recommended:
@@ -356,19 +650,44 @@ before switching it to enforcing mode.
 
 ## 5. Open questions on conversations
 
-The validation project had no conversation surface onboarded, so the following
-require confirmation in an onboarded project before the conversation posture is
-claimed complete:
+**All four questions below were closed on 2026-08-27**, along with a fifth added
+during that work — and **questions 3 and 5 were then answered the other way on
+2026-08-30**, when the key was finally supplied in the location the API wants
+rather than the one the documentation names. The blocker that had held them open
+was misdiagnosed as the validation project lacking Gemini onboarding; it is in
+fact that `us-east4` — the framework's default location — cannot create
+conversations at all, while `us`, `eu` and `global` can. Once the probes moved to
+`us`, everything below became measurable. The answers are folded into F8; they
+are summarised here because several of them reverse what earlier sections
+assumed.
 
-1. Does `CreateConversation` emit an Admin Activity audit log? If conversations
-   are not audited, Layer 4 can never cover them — largely moot given the
-   singleton key, but it should be stated rather than assumed.
-2. Is `DeleteConversation` soft or hard? If it is soft like `DeleteDataAgent`
-   (F1), "ephemeral" is not what it appears and the retention story changes.
-3. Does key revocation block message content? Proven for agent context (§2);
-   unproven for messages.
-4. Can the singleton key be rotated, and what happens to conversations
-   encrypted under the previous key?
+| Question | Answer |
+| :--- | :--- |
+| 1. Does `CreateConversation` emit an Admin Activity audit log? | **No.** Nothing under `geminidataanalytics`. The lifecycle appears as `cloudaicompanion` `TopicService.*` **Data Access** logs, off by default, with null request/response payloads. Layer 4 can never cover conversations. |
+| 2. Is `DeleteConversation` soft or hard? | **Hard.** `NotFound` immediately, absent from LIST, and the ID is instantly reusable. No tombstone, no purge window — the opposite of `DeleteDataAgent` (F1). |
+| 3. Does key revocation block message content? | **Yes, for a conversation that carries its own key** — blocked at t+5min in `us`, t+2min in `eu`, with the Firestore CMEK error. The *anchor agent's* key does not cover messages; the conversation's own key does. The 2026-08-27 "no" tested only the former, because no conversation could then be given a key. |
+| 4. Can the registered key be rotated? | **Version yes, key no.** A new primary key version is accepted. A different key is refused, and disabling every version of the registered key does not free the slot. |
+| 5. What encryption does a keyless conversation get? | **Google-managed — and keyless conversations still exist alongside keyed ones.** A conversation created without `kms_key` in a location where a key *is* registered does not inherit it, and stays readable while that key is disabled. |
+
+Question 5 was raised on the assumption that a keyless conversation might
+silently inherit a registered key, making "CMEK is optional" cosmetic rather than
+real. Measured directly, the opposite is true: the registry constrains *which*
+key may be used, and each caller independently decides *whether* to use one. CMEK
+on conversations is real, and it is opt-in — which is exactly the combination
+that needs a detective control, because nothing about a correctly configured key
+reveals that no conversation is using it.
+
+**Still not established.** Whether the two defects behind all of this are
+permanent or transient. Google documents conversation CMEK as working in
+`us-east4`, `us` and `eu`, so the measured behaviour is a regression against the
+published contract rather than a design boundary — which makes "permanent" the
+less likely reading of the two. `us-east4`'s inability to create a conversation
+reproduced in two unrelated projects on 2026-08-27, one freshly onboarded, which
+rules out project-level state but not a regional fault. Re-run
+`layer5/conversation_cmek_probe.py` before treating any of it as settled; if
+`us-east4` starts creating conversations, or `us`/`eu` start accepting a
+same-region key, the key-slot behaviour becomes reachable in a CMEK-capable
+location and the whole finding needs re-validation.
 
 ## 6. Reproducing
 

@@ -184,6 +184,31 @@ Calling the global endpoint with a regional resource path returns a misleading
 `403 Read access to project ... was denied` — not a 404. Budget debugging time
 for this; it looks like an IAM problem and is not.
 
+**Where the key goes depends on the resource type**, and the two rules are
+opposites. A `DataAgent` takes a key in **its own location** (`us` → a key in
+`us`; `eu` → a key in `europe`, because Cloud KMS has no `eu`). A `Conversation`
+in a multi-region takes a key in that multi-region's **paired primary region**
+and refuses everything else, including the same-named multi-region:
+
+| Resource | Location | KMS location for its key |
+| :--- | :--- | :--- |
+| `DataAgent` | `us-east4` / `us` / `eu` | `us-east4` / `us` / `europe` |
+| `Conversation` | `us` / `eu` | `us-central1` / `europe-west1` |
+
+Conversations cannot be created in `us-east4` at all. None of this is
+documented — Google states one same-location rule for both — so an estate
+serving both resource types in one multi-region needs two key rings in two KMS
+locations.
+
+The conversation row is keyed on the **conversation's own** location — the
+`parent` of `CreateConversation`, meaning `projects/P/locations/L`. A
+conversation's parent is *not* its agent: the agent is a reference in the
+request body and does not affect the key. Measured: a conversation in `us`
+referencing an `eu` agent is created with a `us-central1` key and rejects a
+`europe-west1` one. That is also how a `us-east4` agent is used
+conversationally, since `us-east4` cannot host a conversation: the conversation
+goes in `us` and references the agent across locations. See [validation-report F8](validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location).
+
 Client selection matters too. The **discovery document is not publicly served**
 (`403 unregistered callers` even with a valid bearer token), so
 `googleapiclient.discovery.build("geminidataanalytics", ...)` is not a viable
@@ -553,8 +578,13 @@ Two consequences worth stating plainly:
   conversation, notably `bigquery.studioUser`, `bigquery.studioAdmin`,
   `iam.dataScientist` and the `discoveryengine.*` user roles. In a data-analytics
   estate that is most analysts, so **conversation creation cannot be contained
-  by allow-grants alone** — the CMEK attestation in Layer 5 is the control that
-  actually binds. See [validation-report F8](validation-report.md#f8-conversations-are-a-second-cmek-surface-governed-differently).
+  by allow-grants alone**. There is a cryptographic control standing behind IAM
+  here, but it does not close the gap on its own: a conversation *can* be
+  CMEK-encrypted, and the key is a real boundary — but only if the caller who
+  creates the conversation supplies it, and those are the same callers IAM
+  failed to contain. So the containment is an IAM deny policy plus project
+  segregation, with CMEK covering the conversations that opted in. See
+  [validation-report F8](validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location).
 * **`cloudaicompanion` cannot be restricted to GDA.** It is one service for
   enablement and org-policy purposes, so `restrictServiceUsage`, API
   enable/disable and VPC-SC are all-or-nothing across Code Assist, Cloud Assist,
@@ -569,21 +599,24 @@ Two consequences worth stating plainly:
   with the policy in place a project **Owner** is denied and only the excepted
   persona gets through, because deny policies are evaluated before allow
   policies. Attachment-point trade-offs are tabulated in
-  [validation-report F8](validation-report.md#f8-conversations-are-a-second-cmek-surface-governed-differently).
+  [validation-report F8](validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location).
   Note it denies by *permission*, not by
   product, so it may also block Cloud Assist's own conversations.
   `restrictServiceUsage`, by contrast, blocks the excepted persona too — it is
   per-service, not per-principal. Both were applied to the live project and
-  removed; see [validation-report F8](validation-report.md#f8-conversations-are-a-second-cmek-surface-governed-differently).
+  removed; see [validation-report F8](validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location).
 * **Do not reach for `restrictServiceUsage` as the general control.** It
   inherits down the hierarchy, so it is one org/folder policy plus a carve-out
   rather than a per-project chore — but `cloudaicompanion` is the same service
   that backs Gemini **Code Assist**, so denying it org-wide turns off code
   assistance for every developer in the organization. Reserve it for projects
   that should have no Gemini surface at all. Contain the *data* instead: host
-  agents and conversations in dedicated projects, apply the deny policy there,
-  and let the **CMEK attestation** be the backstop — it binds the content
-  whoever created it.
+  agents and conversations in dedicated projects and apply the deny policy
+  there. Note how weak the backstop is: CMEK on a conversation is real, but it
+  is supplied by whoever creates the conversation, so the caller a wrong deny
+  policy lets through is also the caller who decides whether the content is
+  encrypted at all. Project segregation is therefore load-bearing rather than
+  defence in depth, and CMEK only covers the conversations that asked for it.
 
 Keeping this as a **separate persona** rather than widening `dataAgentStatelessUser`
 is deliberate: enabling conversations reaches into another service with another
@@ -986,7 +1019,7 @@ instead of reverse-engineering the reasoning from the code.
 | **"Could not determine" is a distinct outcome** | Layer 4 fails closed; Layer 5 classifies API-invisible rows `NON_COMPLIANT_UNVERIFIABLE`; `reconcile_check` exits INCOMPLETE rather than guessing. A partial read must never collapse into a confident verdict |
 | **One shared compliance implementation** | `common/gda_common.py` is used by both the enforcer and the scanner, so the real-time and periodic controls cannot disagree about the same resource |
 | **Structured logs**, not Security Command Center findings | SCC custom findings require org-level activation; a structured log plus a log-based alert is portable to any project |
-| Layer 1 **rejects conversations** rather than provisioning them | The conversation CMEK key is a singleton per project + location, so there is nothing per-resource to enforce. Layer 5 attests the registered key instead |
+| Layer 1 **rejects conversations** rather than provisioning them | A conversation's CMEK key is chosen per conversation at runtime, not by a pipeline, so a manifest would pin nothing while looking like it had — and offering a key is a permanent write a retrying pipeline must never be able to make. Layer 5 reports the posture instead ([F8](validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location)) |
 
 Three things hold regardless of which of the above you revisit: the CMEK
 mechanism itself is a real cryptographic boundary (§4.4), the layered
@@ -1019,9 +1052,10 @@ Everything below runs end-to-end in a throwaway project.
 | `layer4/` | Remediation function, log sink, deploy script |
 | `layer5/` | Compliance scanner, BigQuery DDL and view, deploy script |
 | `layer5/revocation_proof.py` | Live proof that the CAI cross-check catches API-invisible agents |
+| `layer5/conversation_cmek_probe.py` | Re-measures the conversation CMEK rules — paired-region key, opt-in CMEK, the `us-east4` outage ([F8](validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location)); exits non-zero on platform drift |
 | `common/gda_common.py` | Endpoint resolution and the single compliance verdict |
 | `tests/run_layer{1,2,3,4,5}.sh` | Per-layer gates |
-| `tests/unit/`, `tests/run_unit.sh` | Offline Python unit tests (93) — verdict, audit-log parsing, reconciliation matrix |
+| `tests/unit/`, `tests/run_unit.sh` | Offline Python unit tests (96) — verdict, audit-log parsing, reconciliation matrix |
 | `.github/workflows/cmek-policy.yml` | Reference CI pipeline: unit tests + Layer 1 policy gate |
 | `scripts/99_teardown.sh` | Deletes both projects (prompts for confirmation) |
 
@@ -1167,9 +1201,20 @@ and must not be run against a real project.
 2. Create both service identities and grant each
    `roles/cloudkms.cryptoKeyEncrypterDecrypter` on every approved key
    ([§4.3](#43-preflight--both-service-agents)).
-3. Confirm keys and agents share a location, and that the location is
-   `us-east4`, `us` or `eu`.
+3. Confirm each agent's location is `us-east4`, `us` or `eu`, and that its key
+   is in the KMS location that location demands — the same name except for
+   `eu`, whose key must be in `europe` because Cloud KMS has no `eu`
+   ([§4.1](#41-supported-locations-and-endpoints--mandatory)).
 4. Apply `gcp.resourceLocations` to block `global` natively.
+5. **The conversation surface, separately.**
+   `scripts/02_conversation_key.sh` creates the keys that surface needs, in the
+   multi-region's *paired* region (`us` → `us-central1`, `eu` →
+   `europe-west1`). These are additional key rings, not substitutes for the
+   agent keys, and conversations cannot be hosted in `us-east4` at all. Nothing
+   in Steps 2–4 depends on this, and nothing here depends on them — but skip it
+   only if the estate creates no conversations, because their messages are
+   customer content that no other step in this runbook covers
+   ([F8](validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location)).
 
 ### Step 2 — Deploy guardrails
 

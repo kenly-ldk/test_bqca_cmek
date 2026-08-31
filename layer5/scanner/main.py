@@ -40,8 +40,8 @@ from google.cloud import asset_v1, bigquery, geminidataanalytics
 
 from gda_common import (
     api_endpoint,
-    attest_conversation_key,
     evaluate_compliance,
+    evaluate_conversation_compliance,
     kms_key_project,
     parse_agent_name,
     parse_approved_projects,
@@ -153,7 +153,7 @@ def scan_api() -> tuple[dict[str, dict], dict[str, str]]:
 
 
 def scan_conversation_keys() -> dict[str, tuple[list[str | None], str | None]]:
-    """The registered conversation CMEK key per location.
+    """Every conversation's CMEK key, per location.
 
     Cloud Asset Inventory cannot help here — it has no Conversation asset type
     at all:
@@ -161,12 +161,15 @@ def scan_conversation_keys() -> dict[str, tuple[list[str | None], str | None]]:
         INVALID_ARGUMENT: No supported asset type matches:
         geminidataanalytics.googleapis.com/Conversation
 
-    so unlike DataAgents there is no second source to reconcile against. That
-    would normally be a problem (a LIST-only inventory under-reports, F4), but
-    it is not, because there is nothing to inventory: CMEK for conversations is
-    a project+location singleton, so reading the key off any one conversation
-    tells you the key for all of them. This lists conversations only to read
-    that key, never to track them — they are ephemeral by design.
+    so unlike DataAgents there is no second source to reconcile against, and
+    this is LIST-only by necessity. That under-reports for the same reason it
+    does on the agent side (F4): a conversation encrypted with a disabled key
+    drops out of LIST. An all-clear therefore covers what this scan could see.
+
+    Every conversation has to be read, not just one. CMEK is opt-in per
+    conversation and an unkeyed conversation does not inherit the key registered
+    for the project+location (F8), so two conversations in the same location can
+    disagree and the key off any one of them proves nothing about the others.
 
     Returns {location: (observed keys, error or None)}.
     """
@@ -188,19 +191,24 @@ def scan_conversation_keys() -> dict[str, tuple[list[str | None], str | None]]:
 
 
 def build_conversation_rows(scan_time: datetime) -> list[dict]:
-    """One attestation row per project+location, not one per conversation."""
+    """One verdict row per project+location, summarising every conversation in it.
+
+    Conversations are ephemeral and hard-deleted, so a row each would churn a
+    table nobody can act on. The verdict is still computed over all of them —
+    the location fails if any single conversation is unprotected — and
+    ``configured_kms_key`` records a key actually in use, or None when none is.
+    """
     rows = []
     for location, (keys, error) in scan_conversation_keys().items():
         if error:
             status = SCAN_INCOMPLETE
             reason = (
-                f"Could not list conversations in '{location}' ({error}). The "
-                "registered CMEK key could not be read, so conversation posture "
-                "was NOT verified this scan."
+                f"Could not list conversations in '{location}' ({error}), so "
+                "conversation posture was NOT verified this scan."
             )
             observed = None
         else:
-            verdict = attest_conversation_key(location, keys, APPROVED)
+            verdict = evaluate_conversation_compliance(location, keys, APPROVED)
             status, reason = verdict.status, verdict.reason
             observed = next((k for k in keys if k), None)
 
@@ -291,8 +299,8 @@ def build_rows(scan_time: datetime) -> tuple[list[dict], dict[str, str]]:
             }
         )
 
-    # One attestation per project+location, appended to the same table so the
-    # compliance view has a single source. See build_conversation_rows.
+    # One conversation verdict per project+location, appended to the same table
+    # so the compliance view has a single source. See build_conversation_rows.
     rows.extend(build_conversation_rows(scan_time))
     return rows, failed_locations
 

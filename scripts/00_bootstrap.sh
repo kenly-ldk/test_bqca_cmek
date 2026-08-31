@@ -74,4 +74,12 @@ Next: deploy the controls, then a CMEK-protected agent on top of them.
 To then run the validation suite, add the negative fixtures:
 
   bash scripts/01_test_fixtures.sh
+
+Conversations are a separate surface — none of the five layers governs them —
+but not an optional one: their messages are customer content too. They need
+their own keys, in the multi-region's PAIRED region rather than the agents'
+locations (validation-report F8). Run this unless the estate creates no
+conversations at all:
+
+  bash scripts/02_conversation_key.sh
 EOF

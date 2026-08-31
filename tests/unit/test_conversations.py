@@ -1,20 +1,27 @@
-"""Unit tests for conversation CMEK attestation.
+"""Unit tests for the conversation CMEK verdict.
 
 Conversations are governed differently from DataAgents, and every test here
-exists because of a fact verified against the live API rather than assumed:
+exists because of a fact verified against the live API rather than assumed
+(validation-report F8, re-measured 2026-08-30):
 
-* `Conversation` carries its own `kms_key`, so it is a second CMEK-bearing
-  resource type — conversation *messages* are customer content.
-* CMEK for conversations is a **project+location singleton**. Supplying any key
-  other than the registered one is rejected, including a different key in the
-  *same project*: "Only 1 KMS keys per project per location are allowed." That
-  is stricter than restrictCmekCryptoKeyProjects, which constrains only the
-  project.
+* `Conversation` carries a `kms_key`, and it is a real cryptographic boundary:
+  disable the key and both `GetConversation` and `ListMessages` fail within a
+  few minutes. Conversation *messages* are customer content, so this matters.
+* **CMEK is opt-in per conversation.** A conversation created without a key does
+  NOT inherit the key registered for its project+location — it stays readable
+  while that key is disabled. So two conversations side by side can disagree,
+  and the location is only as good as its worst one. That is why the verdict
+  takes every observed key rather than a single registered one.
+* The API still registers **one key per project+location** and refuses every
+  other key. That is a squatting hazard rather than a protection, but it does
+  mean two distinct keys in one location should be impossible — so the classifier
+  treats it as a contradiction rather than picking a winner.
 * Cloud Asset Inventory has no Conversation asset type at all, so there is no
   second source to reconcile against.
 
-Together those collapse the control: rather than inventorying ephemeral
-conversations, attest one registered key per project+location.
+Rows stay one-per-location rather than one-per-conversation because
+conversations are ephemeral and hard-deleted; the verdict is still computed
+across all of them.
 """
 
 from __future__ import annotations
@@ -27,7 +34,7 @@ from gda_common import (
     NO_CONVERSATIONS,
     UNAPPROVED_KEY_PROJECT,
     UNSUPPORTED_LOCATION,
-    attest_conversation_key,
+    evaluate_conversation_compliance,
     parse_conversation_name,
 )
 
@@ -39,54 +46,74 @@ OTHER_APPROVED = "projects/approved-b/locations/us-east4/keyRings/kr/cryptoKeys/
 ROGUE = "projects/rogue-project/locations/us-east4/keyRings/kr/cryptoKeys/k"
 
 
-# --- attestation ------------------------------------------------------------
+# --- the verdict ------------------------------------------------------------
 
 
-def test_registered_approved_key_is_compliant():
-    assert attest_conversation_key("us-east4", [GOOD], APPROVED).status == COMPLIANT
+def test_keyed_conversation_with_an_approved_key_is_compliant():
+    assert evaluate_conversation_compliance("us-east4", [GOOD], APPROVED).status == COMPLIANT
 
 
-def test_many_conversations_sharing_the_singleton_key_is_one_verdict():
-    """The point of the singleton: N conversations, one key, one answer."""
-    assert attest_conversation_key("us-east4", [GOOD] * 50, APPROVED).status == COMPLIANT
+def test_many_conversations_sharing_one_key_is_one_verdict():
+    """N conversations, all keyed with the location's one registered key."""
+    assert evaluate_conversation_compliance("us-east4", [GOOD] * 50, APPROVED).status == COMPLIANT
 
 
-def test_unapproved_registered_key_is_a_violation():
-    verdict = attest_conversation_key("us-east4", [ROGUE], APPROVED)
+def test_unapproved_key_is_a_violation():
+    verdict = evaluate_conversation_compliance("us-east4", [ROGUE], APPROVED)
     assert verdict.status == UNAPPROVED_KEY_PROJECT
     assert "rogue-project" in verdict.reason
 
 
 def test_conversations_with_no_key_are_non_compliant():
     """The gap: the API accepts a conversation with no kms_key."""
-    assert attest_conversation_key("us-east4", [None], APPROVED).status == MISSING_CMEK
+    assert evaluate_conversation_compliance("us-east4", [None], APPROVED).status == MISSING_CMEK
+
+
+def test_one_unkeyed_conversation_condemns_the_location():
+    """The opt-in gap, measured: an unkeyed conversation does not inherit the
+    registered key, so 49 protected conversations do not cover the 50th."""
+    verdict = evaluate_conversation_compliance("us-east4", [GOOD] * 49 + [None], APPROVED)
+    assert verdict.status == MISSING_CMEK
+    assert "1 of 50" in verdict.reason
+
+
+def test_unkeyed_count_is_reported_so_the_row_is_actionable():
+    verdict = evaluate_conversation_compliance("us-east4", [None, GOOD, None], APPROVED)
+    assert "2 of 3" in verdict.reason
+
+
+def test_unkeyed_is_reported_before_an_unapproved_key():
+    """Both are violations; the concrete, actionable one leads."""
+    verdict = evaluate_conversation_compliance("us-east4", [ROGUE, None], APPROVED)
+    assert verdict.status == MISSING_CMEK
 
 
 def test_no_conversations_is_not_a_violation():
     """An empty surface carries no exposure — but it is not a pass either."""
-    verdict = attest_conversation_key("us-east4", [], APPROVED)
+    verdict = evaluate_conversation_compliance("us-east4", [], APPROVED)
     assert verdict.status == NO_CONVERSATIONS
     assert not verdict.is_compliant
 
 
 def test_unsupported_location_still_wins():
-    assert attest_conversation_key("global", [GOOD], APPROVED).status == UNSUPPORTED_LOCATION
+    assert evaluate_conversation_compliance("global", [GOOD], APPROVED).status == UNSUPPORTED_LOCATION
 
 
 def test_conflicting_keys_are_flagged_rather_than_averaged():
-    """Should be unreachable while the API enforces the singleton.
+    """Should be unreachable while the API registers one key per location.
 
-    If it ever fires, the assumption the whole control rests on has changed, so
-    it must be loud rather than silently picking one key.
+    Unlike a mix of keyed and unkeyed — which is normal, because CMEK is opt-in
+    — two *different* keys contradict a measured invariant. If it ever fires,
+    say the posture is unknown rather than silently picking a winner.
     """
-    verdict = attest_conversation_key("us-east4", [GOOD, OTHER_APPROVED], APPROVED)
+    verdict = evaluate_conversation_compliance("us-east4", [GOOD, OTHER_APPROVED], APPROVED)
     assert not verdict.is_compliant
     assert "distinct" in verdict.reason
 
 
 def test_conflicting_keys_flagged_even_when_all_are_approved():
     """Both keys are in approved projects; the contradiction is still the story."""
-    verdict = attest_conversation_key("us-east4", [GOOD, OTHER_APPROVED], APPROVED)
+    verdict = evaluate_conversation_compliance("us-east4", [GOOD, OTHER_APPROVED], APPROVED)
     assert verdict.status != COMPLIANT
 
 
@@ -127,21 +154,21 @@ def conv_rows(monkeypatch):
     return _rows
 
 
-def test_one_attestation_row_per_location_not_per_conversation(conv_rows):
+def test_one_row_per_location_not_per_conversation(conv_rows):
     rows = conv_rows({"us-east4": ([GOOD] * 40, None), "eu": ([GOOD], None)})
     assert len(rows) == 2
     assert all(r["resource_type"] == scanner.CONVERSATION_KEY for r in rows.values())
     assert rows["us-east4"]["resource_url"].endswith("/locations/us-east4/conversations")
 
 
-def test_attestation_row_records_the_observed_key(conv_rows):
+def test_row_records_an_observed_key(conv_rows):
     rows = conv_rows({"us-east4": ([GOOD], None)})
     assert rows["us-east4"]["configured_kms_key"] == GOOD
     assert rows["us-east4"]["kms_key_project"] == "approved-a"
     assert rows["us-east4"]["compliance_status"] == COMPLIANT
 
 
-def test_attestation_never_claims_cai_corroboration(conv_rows):
+def test_row_never_claims_cai_corroboration(conv_rows):
     """CAI has no Conversation asset type; the row must not imply two sources."""
     rows = conv_rows({"us-east4": ([GOOD], None)})
     assert rows["us-east4"]["visible_in_cai"] is False
@@ -163,7 +190,7 @@ def test_unreadable_location_is_not_confused_with_empty(conv_rows):
     assert empty["compliance_status"] == NO_CONVERSATIONS
 
 
-def test_attestation_rows_carry_no_conversation_content(conv_rows):
+def test_rows_carry_no_conversation_content(conv_rows):
     """Messages are customer content and must never reach the inventory."""
     row = conv_rows({"us-east4": ([GOOD], None)})["us-east4"]
     assert row["agent_id"] is None

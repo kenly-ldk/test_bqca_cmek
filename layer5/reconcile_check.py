@@ -105,7 +105,7 @@ def live_agents(project: str, locations: list[str]) -> tuple[set[str], dict[str,
 def view_rows(project: str, dataset: str, view: str) -> dict[str, str]:
     """DataAgent rows only.
 
-    The view also carries CONVERSATION_KEY rows — one attestation per
+    The view also carries CONVERSATION_KEY rows — one verdict per
     project+location, not a resource the DataAgent API lists. Including them
     would make every one look "missing from the API" and break a reconciliation
     that is specifically about agents.

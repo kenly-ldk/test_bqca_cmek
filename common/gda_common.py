@@ -26,6 +26,15 @@ from dataclasses import dataclass
 # Locations where a CMEK key can actually be attached to a DataAgent.
 CMEK_SUPPORTED_LOCATIONS = frozenset({"us-east4", "us", "eu"})
 
+# Conversations do NOT follow the agent rule, and the difference is not
+# documented anywhere (validation-report F8). A DataAgent takes a key in its own
+# location; a Conversation in a multi-region takes a key in that multi-region's
+# paired primary region, and refuses every other KMS location -- including the
+# same-named multi-region the documentation prescribes. `us-east4` is absent
+# because it cannot host a conversation at all, with or without a key.
+CONVERSATION_KMS_LOCATION = {"us": "us-central1", "eu": "europe-west1"}
+CONVERSATION_LOCATIONS = frozenset(CONVERSATION_KMS_LOCATION)
+
 # Multi-regions use a different endpoint template from true regions.
 _MULTI_REGIONS = frozenset({"us", "eu"})
 
@@ -41,9 +50,9 @@ COMPLIANT = "COMPLIANT"
 MISSING_CMEK = "NON_COMPLIANT_MISSING_CMEK"
 UNAPPROVED_KEY_PROJECT = "NON_COMPLIANT_UNAPPROVED_KEY_PROJECT"
 UNSUPPORTED_LOCATION = "NON_COMPLIANT_CMEK_UNSUPPORTED_LOCATION"
-# Conversation attestation only: no conversation exists in this project+location,
-# so there is no registered key to read and nothing yet to protect. Not a
-# violation — an empty surface has no exposure — but not a pass either.
+# Conversations only: none exists in this project+location, so there is nothing
+# yet to protect. Not a violation — an empty surface has no exposure — but not a
+# pass either.
 NO_CONVERSATIONS = "NO_CONVERSATIONS"
 
 _CONVERSATION_NAME_RE = re.compile(
@@ -169,7 +178,7 @@ def parse_conversation_name(resource_name: str) -> ConversationName | None:
     )
 
 
-def attest_conversation_key(
+def evaluate_conversation_compliance(
     location: str,
     conversation_keys: list[str | None],
     approved_kms_projects: set[str] | frozenset[str],
@@ -180,48 +189,77 @@ def attest_conversation_key(
     is the whole reason this is a separate function rather than a second call to
     ``evaluate_compliance``.
 
-    **CMEK for conversations is a project+location singleton.** Verified against
-    the live API: supplying any key other than the one already registered is
-    rejected outright, including a *different key in the same project* --
+    **CMEK on a conversation is real, and it is opt-in per conversation**
+    (validation-report F8, re-measured 2026-08-30). A conversation created with
+    a ``kms_key`` is genuinely protected: disable that key and both
+    ``GetConversation`` and ``ListMessages`` fail with a Firestore CMEK error,
+    within 2-5 minutes. A conversation created *without* one is not protected,
+    and — this is the point that drives the logic below — it **does not inherit
+    the key registered for its project+location**. It stays readable while that
+    key is disabled.
 
-        Invalid resource state for "conversation.kms_key_name":
-        Cannot add a new KMS key. Only 1 KMS keys per project per location
-        are allowed.
+    So the earlier model, one attestation per project+location, does not hold.
+    The API's "only 1 KMS keys per project per location" registry constrains
+    *which* key may be used; each caller independently decides *whether* to use
+    one. Two conversations side by side in the same location can therefore have
+    different postures, and reading the key off any one of them says nothing
+    about the rest. This function is given every key observed across the
+    conversations currently listed, and the location passes only if all of them
+    are protected by an approved key.
 
-    That is stricter than ``restrictCmekCryptoKeyProjects``, which constrains
-    only the project. It means there is no per-conversation drift to chase: every
-    conversation in a project+location shares one key, so the control collapses
-    to a single attestation per project+location rather than an inventory of
-    ephemeral resources. Conversations are ephemeral by design and are never
-    provisioned from a manifest (Layer 1 rejects them), so an inventory would be
-    both expensive and meaningless.
+    That the registry exists is still worth knowing, because it is a squatting
+    hazard rather than a protection: the first key *offered* is registered even
+    if the create then fails, the caller needs only ``topics.create``, and the
+    slot can never be reassigned or freed. See F8.
 
-    ``conversation_keys`` is the set of ``kms_key`` values observed across the
-    conversations currently listed. Passing an empty list means no conversation
+    ``conversation_keys`` is the list of ``kms_key`` values observed across the
+    conversations currently listed, one entry per conversation, ``None`` where
+    the conversation carries no key. Passing an empty list means no conversation
     exists, which is reported as NO_CONVERSATIONS rather than a violation: an
     empty surface carries no exposure.
+
+    Note this is a LIST-only view. A conversation whose key is already disabled
+    may be absent from LIST entirely (F4 on the agent side, same cause), so an
+    all-clear here means "every conversation this scan could see", not "every
+    conversation".
     """
     if not conversation_keys:
         return Verdict(
             NO_CONVERSATIONS,
-            f"No conversations exist in '{location}', so no CMEK key is "
-            "registered and there is no conversation content to protect.",
+            f"No conversations exist in '{location}', so there is no "
+            "conversation content to protect.",
         )
 
-    distinct = {k or None for k in conversation_keys}
+    total = len(conversation_keys)
+    unkeyed = sum(1 for key in conversation_keys if not key)
+    if unkeyed:
+        # The common, expected drift case, and the reason this is checked before
+        # the registry anomaly below: it is concrete and actionable, where the
+        # anomaly only says the posture is unknown.
+        return Verdict(
+            MISSING_CMEK,
+            f"{unkeyed} of {total} conversations in '{location}' carry no "
+            "kms_key. CMEK is opt-in per conversation and an unkeyed "
+            "conversation does not inherit the key registered for the "
+            "project+location, so its messages rest under Google-managed "
+            "encryption.",
+        )
+
+    distinct = sorted({key for key in conversation_keys if key})
     if len(distinct) > 1:
-        # Should be unreachable while the API enforces the singleton. If it ever
-        # fires, the assumption this whole control rests on has changed.
+        # Should be unreachable: the API registers one key per project+location
+        # and refuses every other one, including a key that does not exist. If
+        # this ever fires, that invariant has changed and the verdict below
+        # would be picking a winner among keys it cannot rank.
         return Verdict(
             UNAPPROVED_KEY_PROJECT,
             f"Conversations in '{location}' report {len(distinct)} distinct "
-            f"kms_key values ({sorted(str(k) for k in distinct)}). The API is "
-            "documented and observed to allow only one key per project per "
-            "location; this contradicts that, so treat the posture as unknown "
-            "and re-verify before relying on any conversation attestation.",
+            f"kms_key values ({distinct}). The API is observed to allow only "
+            "one key per project per location; this contradicts that, so treat "
+            "the posture as unknown and re-verify before relying on it.",
         )
 
-    return evaluate_compliance(location, distinct.pop(), approved_kms_projects)
+    return evaluate_compliance(location, distinct[0], approved_kms_projects)
 
 
 def kms_key_project(kms_key: str | None) -> str | None:

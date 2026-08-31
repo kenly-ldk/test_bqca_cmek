@@ -29,10 +29,11 @@ WITH latest AS (
 SELECT
   i.scan_time,
   -- DATA_AGENT rows are one per agent. CONVERSATION_KEY rows are one per
-  -- project+location: conversation CMEK is a singleton the API pins, and
-  -- conversations are ephemeral, so the control is an attestation of the
-  -- registered key rather than an inventory. Filter on this when a query means
-  -- one or the other; agent-count reconciliation must exclude CONVERSATION_KEY.
+  -- project+location, summarising every conversation there: CMEK is opt-in per
+  -- conversation, so the verdict covers all of them, but conversations are
+  -- ephemeral so they are not inventoried individually. Filter on this when a
+  -- query means one or the other; agent-count reconciliation must exclude
+  -- CONVERSATION_KEY.
   IFNULL(i.resource_type, 'DATA_AGENT') AS resource_type,
   i.resource_url,
   i.project_id,
