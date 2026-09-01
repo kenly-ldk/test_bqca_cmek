@@ -79,8 +79,8 @@ fi
 echo "  Layer 4 enforcer deployed"
 
 # FIRST, on an undisturbed estate — see the ordering note in the header. This is
-# the non-destructive half: the paired-region rule, opt-in CMEK and the us-east4
-# outage. The revocation half runs inside the Layer 3 gate below.
+# the non-destructive half: the paired-region rule, opt-in CMEK, and us-east4
+# refusing to host a conversation. The revocation half runs inside Layer 3 below.
 log "Layer 5 — the platform still behaves the way F8 records"
 RC=0; python -m layer5.conversation_cmek_probe || RC=$?
 case "${RC}" in

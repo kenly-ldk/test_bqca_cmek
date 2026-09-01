@@ -328,23 +328,19 @@ client.create_data_agent_sync(
 )
 ```
 
-Set beside [the conversation call](#how-it-works-1), which is the same project
-and the same multi-region, the two key paths are the whole of the difference:
-`locations/us` here, `locations/us-central1` there.
-
 **The key can only be set at creation** — it cannot be added or changed
 afterwards, which is exactly what makes Layer 4's read-back check trustworthy.
 Endpoint selection is covered in
 [§4.1](docs/design.md#41-supported-locations-and-endpoints--mandatory).
 
-**CMEK is not an access control**, and assuming otherwise is the most common way
+> **CMEK is not an access control**, and assuming otherwise is the most common way
 to misread this. Encryption at rest is orthogonal to who may call the API: the
 two Google-managed service agents decrypt on your behalf, so a caller needs no
 KMS permission at all. The Layer 2 matrix proves it — the `analyst` persona
 holds `dataAgentViewer` and no KMS binding of any kind, and reads the
 CMEK-encrypted agent successfully.
 
-What the key gives you instead is a **kill switch**: disable it and nobody can
+> What the key gives you instead is a **kill switch**: disable it and nobody can
 read that agent — not the analyst, not an admin, not the service itself — and
 `LIST` stops returning it at all. That is revocation, crypto-shredding, key
 custody and an audit trail on key use. It is not authorization. Layer 2 decides
@@ -361,17 +357,6 @@ authoritative. If that read fails it fails closed rather than assuming
 compliance. A non-compliant agent has its content redacted — twice, since one
 pass only rotates it into the read-only `lastPublishedContext` — and is then
 soft-deleted. End to end, 13–30 s.
-
-**Which product this is.** The repo uses two. Layer 4's enforcer is a
-**Cloud Run function** (`gcloud functions deploy --gen2` — the product formerly
-called Cloud Functions 2nd gen). Layer 5's scanner is a **Cloud Run job**
-(`gcloud run jobs deploy`). Neither is a 1st-gen function.
-
-A Cloud Run function is backed by a Cloud Run service, so it is addressable
-through both CLIs, and this repo uses both: `gcloud functions deploy` to create
-it, since that is what wires the Eventarc trigger, and `gcloud run services
-update` to change `DRY_RUN` without a redeploy. Deletion is the one operation
-where the two are not interchangeable — see [gotchas](docs/gotchas.md).
 
 It runs in one of two modes, set by the `DRY_RUN` environment variable on the
 Cloud Run service backing it:
@@ -403,12 +388,6 @@ classifies every row in the `v_agent_compliance` view. Two sources rather than
 one because a disabled key removes an agent from the live `LIST` with no error;
 anything the API cannot show is reported `NON_COMPLIANT_UNVERIFIABLE` rather
 than dropped or vouched for.
-
-It also emits one row per location for **conversations**, if any exist. That
-half is single-sourced by necessity — Cloud Asset Inventory has no Conversation
-asset type — and it reads every conversation's key rather than one of them,
-because CMEK there is opt-in per conversation. A location fails if any single
-conversation in it is unkeyed.
 
 > Layers 1, 2 and 4 exist to make Layer 3's rule hold. Layer 5 is how you know
 > whether it did.
@@ -456,32 +435,39 @@ bash tests/run_agents.sh
 bash scripts/99_teardown.sh       # deletes both projects; prompts
 ```
 
-The order is **dependency-ordered, not layer-numbered** — 1 → 3 → 4 → 5 → 2 —
-and the suite flips Layer 4 between dry run and enforcing at the right points,
-restoring it to enforcing on any exit. The two dependencies that force that
-shape are explained next. The individual `tests/run_layerN.sh` gates still run
-standalone if you want one of them on its own; if you do, you own the toggling.
+**What each gate injects, and what it asserts**, in the order the suite runs
+them — 1 → 3 → 4 → 5 → 2, not layer order. Every live gate creates its own
+fixtures and cleans up after itself; none of them inspect the agent you deployed
+above:
 
-#### Why the test order jumps 3 → 4 → 5 → 2
+| Gate | Injected | Asserted |
+| :--- | :--- | :--- |
+| unit | nothing — offline | 113 tests: the compliance verdict, audit-log parsing for both resource types, the reconciliation matrix |
+| Layer 1 | nothing — offline | Policy compiles and lints; 46 policy tests; a violating manifest is rejected in-process with no API call |
+| Layer 3 | one **compliant** agent, then its CMEK key version is **disabled** | `kms_key` round-trips on `GET`; content readable while enabled; `FailedPrecondition` while disabled; `GET` fails closed; `LIST` omits the agent with no error; readable again after re-enable |
+| Layer 4 | four agents at once — **compliant**, **no key**, **unapproved-project key**, **`global`** | The compliant one survives. The other three are redacted twice and soft-deleted in ~13–35 s, each with the matching status, and their tombstones carry no content |
+| Layer 5 | nothing new; runs the scanner, then disables the key again | Every row classified; the view and the live API reconcile as sets; agents hidden by the disabled key are reported `NON_COMPLIANT_UNVERIFIABLE`, never `COMPLIANT` |
+| Layer 2 | one **key-less** agent, created *as the pipeline persona* | The 45-cell persona × operation matrix matches the documented model, and Layer 4 remediates that agent naming `layer2-cicd-deployer@…` as the caller |
 
-Each `tests/run_layerN.sh` verifies Layer N — but a test usually has to *do*
-something the layer itself never does, and that is what couples them. Two hard
-dependencies, in opposite directions:
+The `compliant` fixtures matter as much as the violations: they are the control
+proving the enforcer discriminates rather than deleting whatever it sees.
+`global` is included because it can never take a CMEK key by any route, so it
+must be reported non-compliant rather than skipped.
 
-* **The Layer 3 test must run before Layer 4 is enforcing.** It creates a
-  *compliant* agent and then revokes its CMEK key, to prove the key is a real
-  boundary. The enforcer's event for that create arrives ~13–30 s later and does
-  a `GET`, which fails closed while the key is down — so an enforcing Layer 4
-  can redact and soft-delete the test's own compliant fixture mid-run.
-  `tests/run_layer3.sh` aborts rather than race.
-  See [F10](docs/validation-report.md#f10-the-verification-harness-must-not-race-the-enforcer).
-* **The Layer 2 test must run after it.** Its `create` probe makes a key-less
-  agent as the pipeline persona, and an enforcing Layer 4 then remediates it —
-  naming `layer2-cicd-deployer@...` as the caller. That is the defence-in-depth
-  story in one log line, and you only see it in this order.
+**Layer 2 runs last on purpose**, and Layer 3 first, because both tests need
+Layer 4 in a particular state. Layer 3 revokes a key, and an enforcing Layer 4
+would fail closed on the resulting `GET` and delete Layer 3's own compliant
+fixture mid-run — so it runs while Layer 4 is in dry run. Layer 2's `create`
+probe then needs the opposite: an *enforcing* Layer 4, so that the key-less
+agent it creates as the pipeline persona is actually remediated, which is what
+produces the caller attribution in the last column.
 
-Everything else follows: the Layer 4 test before the Layer 5 test, so the
-scanner has remediation history to reconcile against.
+**Side effects on your estate.** The suite toggles Layer 4's `DRY_RUN` while it
+runs and restores it to enforcing on any exit, including failure. Agent deletion
+is soft, so every injected agent leaves a redacted 30-day tombstone; agent IDs
+are run-scoped for that reason. Layers 3 and 5 each disable a live KMS key
+version for a few minutes and re-enable it.
+
 ### Test status
 
 Built and executed against two purpose-created GCP projects — nothing here is
@@ -501,6 +487,20 @@ key revocation in the `us` multi-region, not only in `us-east4`.
 | `run_layer3.sh` | Layer 3 — proven by revoking the key, not by inspecting a field | 6/6 |
 | `run_layer4.sh` | Layer 4 — ~13–30 s detect → redact → soft-delete, incl. a compliant agent that must survive | 7/7 |
 | `run_layer5.sh` | Layer 5 — two reconciled sources, proven by key revocation. Step 7 is a conversation assertion and **skips** on an agents-only estate | Passing |
+
+**Where the individual cases are.** The counts above are totals; each
+`tests/run_layerN.sh` prints its own `[PASS]`/`[FAIL]` lines as it goes, and the
+assertions behind them live here:
+
+| Count | Written in |
+| :--- | :--- |
+| 113 unit tests | [`tests/unit/`](tests/unit/) — 71 test functions, many `@pytest.mark.parametrize`d. Split by concern: `test_gda_common.py` (the verdict), `test_enforcer.py` (audit-log parsing), `test_scanner_build_rows.py` (reconciliation), `test_conversations.py` |
+| 46 policy tests | [`layer1/policy_test.rego`](layer1/policy_test.rego), one `test_*` rule each. The 14 Layer 1 gates that wrap them — compile, lint, fixtures, the in-process gate — are in [`tests/run_layer1.sh`](tests/run_layer1.sh) |
+| 4 custom-rule tests | [`.regal/rules/custom/regal/rules/cmek/no-regex-find-n/`](.regal/rules/custom/regal/rules/cmek/no-regex-find-n/) — the lint rule that blocks the `regex.find_n` capture-group trap, plus its own tests |
+| 45 persona cells | [`layer2/probe.py`](layer2/probe.py) — the persona × operation matrix and its expected outcomes |
+| 6 Layer 3 checks | [`tests/run_layer3.sh`](tests/run_layer3.sh) and [`layer3/verify_cmek.py`](layer3/verify_cmek.py) |
+| 7 Layer 4 checks | [`tests/run_layer4.sh`](tests/run_layer4.sh) — the four injected agents and their expected verdicts |
+| Layer 5 | [`tests/run_layer5.sh`](tests/run_layer5.sh), with the two assertions that need real logic in [`layer5/reconcile_check.py`](layer5/reconcile_check.py) and [`layer5/revocation_proof.py`](layer5/revocation_proof.py) |
 
 ## Part 2 — Conversations
 
@@ -573,54 +573,29 @@ flowchart LR
     style L3 stroke:#1e8449,stroke-width:2px
 ```
 
-**The preventive half carries the weight, because the detective half cannot.**
-Layer 4 detects and attributes, but cannot verify or remediate — the one place
-the two resource types genuinely diverge, and a platform property rather than a
-design choice. A conversation is readable *only by the principal that created
-it*: a service account holding `cloudaicompanion.topics.get` gets an empty list
-and a 404, and `roles/cloudaicompanion.topicAdmin` changes nothing. So the
-enforcer cannot read a conversation's key, cannot issue a compliance verdict on
-one, and could not delete one either. What it does emit is the fact of creation,
-the location, and the caller — recorded nowhere else a compliance team would
-look:
+**Prevention carries the weight here.** A conversation is readable only by the
+principal that created it — `roles/cloudaicompanion.topicAdmin`, the most
+privileged role on the resource, still gets `{}` from LIST and a 404 from GET
+for someone else's ([F8](docs/validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location)).
+So Layer 4 reports the create and the caller, and can go no further:
 
 ```
 CONVERSATION_CREATED_CMEK_UNVERIFIABLE  caller=analyst@example.com
   projects/P/locations/us/conversations/...  action_taken=NONE_CANNOT_READ
 ```
 
-The control that actually binds on this surface is therefore **preventive**:
-Layer 1 gates the key, Layer 2 restricts who may call `CreateConversation` at
-all, and your application sets `kms_key` on every call. Layer 5 still runs on
-this surface, but its verdict is one-way: if it sees an unkeyed conversation
-that is a proven violation, and otherwise it records the location as unverified
-rather than clean.
+Layer 5 is one-way for the same reason: an unkeyed conversation it can see is a
+proven violation, and everything else is recorded as unverified rather than
+clean. What binds instead is Layer 1 gating the key, Layer 2 restricting who may
+call `CreateConversation`, and your application setting `kms_key` every time.
 
-**The ceiling is about identity, not permissions, and your architecture can
-lift it.** The measured rule is that a conversation is visible to the principal
-that created it: `roles/cloudaicompanion.topicAdmin` — which carries
-`topics.delete` and `topics.setIamPolicy`, and is the most privileged role on
-the resource — still gets `{}` and a 404 for someone else's. The `404` rather
-than a `403`, and the list method being named `FindReadableTopics`, both say the
-filter runs on creator identity before IAM is consulted. `setIamPolicy` is no
-way round it either: naming a conversation in a policy requires reading it
-first, and that read is the thing returning 404.
-
-So make your **application's service account the creator of every
-conversation**, rather than passing the end user's credentials through. That one
-identity is then the creator of all of them and can enumerate and read them,
-which restores a verifiable inventory. Two things to weigh:
-
-* **Attribution moves.** Layer 4 will report the app's service account as the
-  caller on every create, not the analyst. If you need per-user attribution you
-  now have to log it in the application, because the audit entry no longer
-  carries it.
-* **Layer 5 has to run as that identity** to benefit — as shipped, the scanner
-  runs as its own service account (`gda-inventory-scanner`) and would need to be
-  that principal or impersonate it.
-
-This follows from the measured visibility rule rather than from a test of the
-pattern itself; it is a design option, not something this repo has stood up.
+**This is an identity limit, not a permissions gap**, so architecture can lift
+it: have your application's service account create every conversation rather
+than passing user credentials through, and that one identity can enumerate and
+read them all. The costs are that Layer 4 then attributes every create to the
+app rather than the analyst, making per-user attribution the application's job,
+and that Layer 5 only benefits if it runs as that identity. Untested here — it
+follows from the visibility rule rather than from a run.
 
 **Your application creates the real conversations,** not a deploy step. Layer 1
 rejects any manifest that declares one, and the key must be supplied per call:
@@ -669,7 +644,7 @@ It calls the Layer 5 probe and the two dedicated gates, **in that order**:
 
 | Gate | Asserts |
 | :--- | :--- |
-| `layer5/conversation_cmek_probe.py` | The paired-region rule, opt-in CMEK and the `us-east4` outage all still hold; exits non-zero on drift, so it is safe to wire into CI |
+| `layer5/conversation_cmek_probe.py` | The paired-region rule, opt-in CMEK, and that `us-east4` still cannot host a conversation; exits non-zero on drift, so it is safe to wire into CI |
 | `tests/run_layer3_conversation.sh` | The pre-flight gate rejects the documented key path and accepts the paired region; a CMEK conversation is created per location; **the key is a real boundary**, proven by revoking it with a keyless control alongside |
 | `tests/run_layer4_conversation.sh` | The create reaches the enforcer through the `cloudaicompanion` sink, is attributed to the caller, is **not** claimed compliant, and is **not** deleted |
 
@@ -691,7 +666,7 @@ few minutes, the control stays readable throughout. The first half shows CMEK
 holds; the second shows it holds only for conversations that asked for it.
 
 To reproduce the platform defects themselves — the rejected documented key path
-and the `us-east4` outage — in a project of your own, and get output you can
+and `us-east4` refusing to host one — in a project of your own, and get output you can
 attach to a support case:
 
 ```bash
@@ -712,7 +687,7 @@ whether this finding has gone stale.
 
 Measured **2026-08-30/31** in a third, purpose-created project: the
 paired-region key rule, the revocation proof with a keyless control, the
-`us-east4` outage, and the visibility ceiling that limits what Layers 4 and 5
+`us-east4` refusing to host one, and the visibility ceiling that limits what Layers 4 and 5
 can claim. `layer3/deploy_conversation.sh`,
 `layer5/conversation_cmek_probe.py` and `scripts/repro_conversation_cmek.py`
 were all run end to end there.
@@ -729,14 +704,24 @@ the keyless control stayed readable throughout.
 
 | Test | What it verifies | Result |
 | :--- | :--- | :--- |
-| `run_conversations.sh` | The whole conversation suite, in dependency order | Passing |
-| `run_layer3_conversation.sh` | Layer 3 — the paired-region gate, then the boundary proven by revoking the key with a keyless control alongside | Passing |
-| `run_layer4_conversation.sh` | Layer 4, conversations — create reported and attributed, no compliance claimed, nothing deleted | Passing |
-| `layer5/conversation_cmek_probe.py` | Layer 5 — the posture probe, run first so it measures an estate no test has disturbed | Passing |
+| `run_conversations.sh` | The whole conversation suite, in dependency order | 3/3 gates |
+| `layer5/conversation_cmek_probe.py` | Layer 5 — the posture probe, run first so it measures an estate no test has disturbed | 1/1 verdict |
+| `run_layer3_conversation.sh` | Layer 3 — the paired-region gate, then the boundary proven by revoking the key with a keyless control alongside | 4/4 |
+| `run_layer4_conversation.sh` | Layer 4, conversations — create reported and attributed, no compliance claimed, nothing deleted | 7/7 |
 | `run_layer5.sh` (steps 7–8) | The same probe and the per-location verdict, from inside the agent gate. Step 7 skips on an agents-only estate | Passing |
+
+Counts are for the shipped `CONVERSATION_LOCATIONS=us`; adding `eu` adds a
+create-and-read-back check per extra location. The probe reports a single
+drift verdict over a matrix it prints in full — the paired key accepted, three
+decoy KMS locations refused per location, and `us-east4` refusing to host a
+conversation at all.
 
 Layer 1's 12 `conversation_keys` policy tests run inside `run_layer1.sh`, and
 Layer 2's conversation cells inside `run_layer2.sh`; neither is repeated here.
+The individual assertions are in
+[`tests/run_layer3_conversation.sh`](tests/run_layer3_conversation.sh),
+[`tests/run_layer4_conversation.sh`](tests/run_layer4_conversation.sh) and
+[`layer5/conversation_cmek_probe.py`](layer5/conversation_cmek_probe.py).
 
 ## Where the CMEK key goes
 

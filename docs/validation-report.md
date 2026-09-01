@@ -440,7 +440,7 @@ immediately after a KMS key version was re-enabled (two failures, then success o
 an identical request), while keyless creates in `us` were 10/10 in the same
 period. It means "the conversation could not be created", including "the key is
 not usable right now". Only its persistence across repeated attempts
-distinguishes the `us-east4` outage from a key-state transient, which is why both
+distinguishes the persistent `us-east4` refusal from a key-state transient, which is why both
 probes retry before concluding anything.
 
 **The one-key-per-project-per-location registry is real, and now matters more.**

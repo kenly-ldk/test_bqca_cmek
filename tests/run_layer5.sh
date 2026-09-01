@@ -197,7 +197,7 @@ if [[ "${CONV_KEYS_PRESENT}" -eq 0 ]]; then
 else
   RC=0; python -m layer5.conversation_cmek_probe || RC=$?
   case "${RC}" in
-    0) check "conversation CMEK posture unchanged" 0 "paired-region key rule, opt-in CMEK and the us-east4 outage all still hold" ;;
+    0) check "conversation CMEK posture unchanged" 0 "paired-region key rule, opt-in CMEK, and us-east4 still refusing to host a conversation" ;;
     2) printf '  [ERROR] conversation CMEK probe INCONCLUSIVE — could not run; re-run\n'
        FAILED=1 ;;
     *) check "conversation CMEK posture unchanged" 1 "platform drift — re-validate F8" ;;

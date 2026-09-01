@@ -1057,7 +1057,7 @@ Everything below runs end-to-end in a disposable project.
 | `layer5/` | Compliance scanner, BigQuery DDL and view, deploy script |
 | `layer5/revocation_proof.py` | Live proof that the CAI cross-check catches API-invisible agents |
 | `layer3/create_conversation.py`, `layer3/deploy_conversation.sh` | Layer 3 for conversations: the paired-region key gate, then a CMEK conversation per location (invoked by `scripts/deploy_conversations.sh`) |
-| `layer5/conversation_cmek_probe.py` | Re-measures the conversation CMEK rules — paired-region key, opt-in CMEK, the `us-east4` outage ([F8](validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location)); exits non-zero on platform drift |
+| `layer5/conversation_cmek_probe.py` | Re-measures the conversation CMEK rules — paired-region key, opt-in CMEK, `us-east4` refusing to host one ([F8](validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location)); exits non-zero on platform drift |
 | `common/gda_common.py` | Endpoint resolution and the single compliance verdict |
 | `tests/run_layer{1,2,3,4,5}.sh` | Per-layer gates |
 | `tests/run_agents.sh`, `tests/run_conversations.sh` | The two per-resource suites, each running its layers in dependency order |
