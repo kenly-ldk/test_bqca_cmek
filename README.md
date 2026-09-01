@@ -24,7 +24,7 @@ that governance, in five layers.
 | 2 — IAM least privilege | Limits who can create an agent at all, so there are fewer ways to bypass the pipeline |
 | 3 — CMEK at rest | Encrypts agent content under your key, so revoking the key makes it unreadable |
 | 4 — Real-time remediation | Catches an agent created outside the pipeline, redacts its content and soft-deletes it; for conversations, reports the create and attributes the caller |
-| 5 — Continuous compliance | Reports the standing CMEK posture for audit, and flags what it could not verify — which on the conversation surface is everything it cannot see |
+| 5 — Continuous compliance | Reports the CMEK posture of every agent, hourly, for audit. Anything it could not check is marked unverified rather than passed. For conversations that means all of them, because only their creator can read one |
 
 Layers 1 and 2 are preventive, 4 and 5 are detective, and 3 is the cryptographic
 boundary the other four exist to keep enforced. Each part below opens with a
@@ -295,9 +295,8 @@ t=0       a non-compliant agent is created outside the pipeline
 ```
 
 Layer 5 is not a duplicate of Layer 4. It reads Cloud Asset Inventory and the
-live API directly, never the enforcer's output, so a create that Layer 4 missed
-is still caught within the hour — which is the whole reason there are two
-detective layers rather than one.
+live API directly, never the enforcer's output. So a create that Layer 4 missed
+is still caught within the hour. That is why there are two detective layers.
 
 #### Layer 1 — the policy gate
 
@@ -594,7 +593,7 @@ Each layer covers conversations, through different mechanics:
 | 4 — detect | `CreateDataAgent`, Admin Activity | `TopicService.CreateTopic`, Data Access (**off by default**) |
 | 4 — verdict | re-reads the agent, rules on it | **cannot re-read** — reports the create and the caller only |
 | 4 — remediate | redact ×2, soft delete | **none possible** — the resource is invisible to the enforcer |
-| 5 — report | per agent, two reconciled sources | per location, and never "clean" — the scanner cannot enumerate conversations it did not create |
+| 5 — report | per agent, two reconciled sources | per location, never a clean bill: the scanner can only list conversations it created itself |
 
 Set against [the agent diagram](#how-it-works), the same five layers change
 shape almost everywhere:
@@ -637,8 +636,8 @@ CONVERSATION_CREATED_CMEK_UNVERIFIABLE  caller=analyst@example.com
 
 The control that actually binds on this surface is therefore **preventive**:
 Layer 1 gates the key, Layer 2 restricts who may call `CreateConversation` at
-all, and your application sets `kms_key` on every call. Layer 5 reports what it
-could not see rather than vouching for it.
+all, and your application sets `kms_key` on every call. Layer 5 marks these
+conversations unverified rather than passing them.
 
 **Your application creates the real conversations,** not a deploy step. Layer 1
 rejects any manifest that declares one, and the key must be supplied per call:
