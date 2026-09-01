@@ -31,6 +31,26 @@ boundary the other four exist to keep enforced. Each part below opens with a
 diagram of its own path — [agents](#how-it-works),
 [conversations](#how-it-works-1) — because the two differ at almost every layer.
 
+**They are independent controls, not a pipeline — adopt any subset.** Nothing
+here requires all five. What each one gives you on its own, and what it leaves
+uncovered:
+
+| Adopt | You get | Still uncovered |
+| :--- | :--- | :--- |
+| 1 alone | No non-compliant manifest reaches the API from your pipeline | Anything created outside the pipeline |
+| 2 alone | Fewer principals able to create a resource at all | What those principals then create |
+| 1 + 2 | Prevention on both the pipeline and the ad-hoc path | Nothing detects a gap in either |
+| 3 alone | Content unreadable once the key is revoked | Nothing ensures a key is set |
+| 4 alone | A non-compliant agent is caught and removed in seconds | Creates the event stream never delivers |
+| 5 alone | An hourly audit position over the whole estate | Up to an hour of exposure |
+| 4 + 5 | Seconds-to-minutes detection with an hourly backstop | Prevention |
+
+The only build-time coupling is `common/gda_common.py`, which Layers 4 and 5
+each embed so their verdicts agree, and `layer3/deploy.sh` calling the Layer 1
+gate, which is what makes it a policy-gated deploy. Layer 5 reads Cloud Asset
+Inventory and the live API — never the enforcer's output — so it stands alone
+and is what catches the creates Layer 4's event stream misses.
+
 **This is not equivalent to native CMEK org-policy enforcement.** Native
 enforcement stops a non-compliant resource from ever existing. This framework
 detects one seconds after it exists, scrubs its content, and soft-deletes it —
