@@ -1184,14 +1184,11 @@ a regulated environment will be at least as strict.
 
 ### 10.5 Gotchas that will cost you time
 
-* **Delete is soft.** Agent IDs stay occupied until `purgeTime` (~30 days), so
-  tests use run-scoped IDs. Re-running with fixed IDs fails with `AlreadyExists`.
-* **Redaction needs two passes** — one leaves the content in `lastPublishedContext`.
-* **Regional endpoints are mandatory**; the global endpoint returns a misleading
-  `403` for regional paths.
-* **`ExportAssets` returns DataAgents only intermittently** (1 of 7 exports in
-  testing); `SearchAllResources` returned them every time.
-* **A disabled key hides an agent from `LIST` with no error.**
+Nineteen of them, in
+[Appendix A](#appendix-a--platform-behaviours-that-will-cost-you-time). Read it
+before the first run rather than after: several — the conversation key location,
+and the fact that offering a key is a permanent write — cost nothing to get
+right up front and cannot be undone afterwards.
 
 ---
 
@@ -1270,3 +1267,122 @@ a real project.
    evidence that native enforcement is working.
 5. Note that any tombstones created before cutover remain until their
    `purgeTime`.
+
+---
+
+## Appendix A — Platform behaviours that will cost you time
+
+Nineteen surprises from building and validating this framework against the live
+API: obvious in hindsight, expensive in the moment. They are properties of the
+platform, not of this implementation, so any control of this class meets them.
+
+This is the short form, one entry each. The measured evidence is in
+[validation-report.md](validation-report.md), and most entries below link to the
+finding (`F1`–`F10`) they distil. Traps in *this repo's* scripts, tests and
+Cloud Run builds are separate, in [maintaining.md](maintaining.md).
+
+### Agents
+
+* **Delete is a soft delete** — for *agents*. 30-day tombstone, content still
+  readable via GET, no purge or undelete. Agent IDs stay occupied, so tests use
+  run-scoped IDs. Conversations behave the opposite way (below).
+  [F1](validation-report.md#f1-delete-is-a-soft-delete-with-a-30-day-readable-tombstone)
+* **Redaction needs two passes.** Publishing an empty context rotates the
+  previous one into the output-only `lastPublishedContext`, which cannot be
+  cleared directly — so the first pass moves the content there rather than
+  removing it, and the second rotates the empty context in behind it.
+  [F1](validation-report.md#f1-delete-is-a-soft-delete-with-a-30-day-readable-tombstone)
+* **A disabled key hides an agent from `LIST` with no error**, and makes `GET`
+  fail entirely — so never build an inventory from `LIST` alone.
+  [F4](validation-report.md#f4-a-disabled-key-hides-an-agent-from-list-with-no-error)
+* **`dataAgentCreator` grants `create` and nothing else** — no `get`, `list` or
+  `update`. Pair it with `dataAgentViewer` or your pipeline cannot read back
+  what it deployed.
+* **CAI `ExportAssets` returns DataAgents only intermittently** (1 of 7 exports
+  in testing); `SearchAllResources` returned them every time. Build the
+  inventory on the search API.
+  [F3](validation-report.md#f3-exportassets-coverage-of-dataagent-is-unreliable)
+
+### Locations and keys
+
+* **Per-location endpoints are mandatory.** Each location is addressed through
+  its own endpoint, and "regional" is the wrong shorthand — two of the three
+  CMEK locations, `us` and `eu`, are multi-regions. `global` cannot be
+  CMEK-encrypted, and the global endpoint returns a misleading `403` for a
+  non-global resource path.
+  [F6](validation-report.md#f6-per-location-endpoints-are-mandatory-global-cannot-be-cmek-encrypted)
+* **A conversation's CMEK key goes in the *paired* region, not the documented
+  one.** `us` → **`us-central1`**, `eu` → **`europe-west1`**. Every other KMS
+  location is refused, including the same-named multi-region the documentation
+  tells you to use. Follow the docs exactly and you get *"KMS key must be in the
+  same location as parent"* every time, which reads like your key path is wrong.
+  It isn't. `python scripts/repro_conversation_cmek.py --project YOUR_PROJECT
+  --setup` runs both paths side by side in your own project.
+  [F8](validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location)
+* **Agents and conversations want their keys in *different* places.** A
+  `DataAgent` in `us` takes a key in `us` and rejects `us-central1`; a
+  `Conversation` in `us` is the exact reverse. One documented rule covers both.
+  Budget for two key rings per multi-region.
+* **Offering a conversation key is a permanent write, even when the call
+  fails.** The first key submitted pins the whole project + location —
+  *including the key name*, measured both ways on 2026-09-01: two estates pinned
+  to different names each refuse the other's, same ring and location. Every
+  later key is refused with `Cannot add a new KMS key`, disabling the key does
+  not free the slot, and no API resets it. Anyone who can call
+  `CreateConversation` can burn it.
+  [F8](validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location)
+* **`us-east4` cannot create a conversation at all** — 0 of 13 keyless
+  attempts, and keyed attempts fail the same way, despite the location being
+  listed as CMEK-supported. If `us-east4` is your default location,
+  conversations do not work there.
+* **`Invalid resource state for "conversation"` is a generic error.** It is what
+  `us-east4` always returns, but it also appears transiently elsewhere when a
+  KMS key is briefly unusable — right after re-enabling a key version, for
+  instance. Retry before concluding a location is broken.
+
+### Conversations
+
+* **Conversation CMEK is opt-in, per conversation.** A conversation created
+  without `kms_key` does **not** inherit the key registered for its
+  project + location, and stays readable when that key is disabled. So a
+  correctly configured, correctly permissioned key tells you nothing about
+  whether anything is using it — which is why Layer 5 reads every conversation
+  rather than attesting one key per location.
+  [F8](validation-report.md#f8-conversation-cmek-works-but-only-with-an-undocumented-key-location)
+* **A conversation can only be read by whoever created it.** Not an IAM gap —
+  `roles/cloudaicompanion.topicAdmin`, which carries `topics.delete` and
+  `topics.setIamPolicy`, still gets `{}` from LIST and **404** from GET for
+  another principal's conversation. So no scanner can inventory the surface and
+  no enforcer can verify a key. Govern it before creation, not after.
+* **`DeleteConversation` is a *hard* delete** — unlike agents. `NotFound`
+  immediately, gone from `LIST`, and the ID is reusable at once. No tombstone,
+  so conversation IDs do not need to be run-scoped.
+* **Conversation lifecycle logs are Data Access, under `cloudaicompanion`.**
+  `CreateConversation` emits nothing under `geminidataanalytics`; it appears as
+  `TopicService.CreateTopic`, in a log stream that is **off by default**, with
+  null request and response payloads. A sink matches it only once Data Access
+  logs are enabled on `cloudaicompanion` — and even then you can attribute the
+  create but not verify it, because the re-read returns 404 (above).
+
+### Conversation IAM
+
+* **Conversations are gated by `cloudaicompanion.topics.*`, not by any
+  `geminidataanalytics` permission.** None of the nine GDA roles can create one.
+  The minimum is a custom role with `topics.create` + `topics.get` +
+  **`operations.get`** (create is an LRO and the poll is authorized separately —
+  easy to miss). `layer2/deploy.sh` ships it as `gdaConversationUser`.
+* **You cannot grant conversation *delete* at least privilege.**
+  `cloudaicompanion.topics.delete` is `NOT_SUPPORTED` in custom roles; only
+  `topicAdmin` has it, and that drags in `setIamPolicy`. Let conversations
+  expire instead.
+* **Nothing can gate `ListConversations`** — there is no `topics.list`
+  permission at all, so a principal with no role can enumerate them.
+* **`cloudaicompanion` is shared across Gemini for Google Cloud**, not private
+  to GDA. Of 2,387 predefined roles, 16 can create a conversation — including
+  **`bigquery.studioUser`** and **`iam.dataScientist`**, which in a data estate
+  is most of your analysts. It **cannot be restricted to GDA**: it is one
+  service, so org policy and API enablement are all-or-nothing across Code
+  Assist, Cloud Assist and Agentspace, and `restrictServiceUsage` denies Gemini
+  Code Assist to everyone along with it. The only per-principal lever is an IAM
+  deny policy (org/folder-level `denyAdmin`). Contain the data instead —
+  dedicated projects — and pair it with CMEK on the conversations themselves.

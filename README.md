@@ -609,8 +609,8 @@ conversation = geminidataanalytics.Conversation(
     agents=[f"projects/{project}/locations/us/dataAgents/{agent_id}"],
 )
 conversation.kms_key = (
-    f"projects/{kms_project}/locations/us-central1"    # the PAIRED region.
-    f"/keyRings/gda-kr/cryptoKeys/agent-key"           # `us` is rejected here.
+    f"projects/{kms_project}/locations/us-central1"      # the PAIRED region.
+    f"/keyRings/gda-kr/cryptoKeys/conversation-key"      # `us` is rejected here.
 )
 
 client.create_conversation(
@@ -900,18 +900,22 @@ run against a project you care about:
 
 ## Going deeper
 
-This README is the overview. The three documents below are the detail behind it.
+This README is the overview. The documents below are the detail behind it.
 
 * **[docs/design.md](docs/design.md)** — the deep dive. Architecture, per-layer
   component detail, the IAM persona model, which org-policy constraints the API
   actually supports, a control-equivalence matrix, and a cutover runbook for
-  when native enforcement ships.
+  when native enforcement ships. Its
+  **[Appendix A](docs/design.md#appendix-a--platform-behaviours-that-will-cost-you-time)**
+  is the one to read first if you are about to deploy: nineteen platform
+  behaviours that will cost you time, one entry each — soft delete, two-pass
+  redaction, the endpoint rules, and the conversation permission and CMEK model
+  that lives in a different service entirely and follows its own key-location
+  rule.
 * **[docs/validation-report.md](docs/validation-report.md)** — the evidence.
   What was measured, the ten platform behaviours any control of this class has
   to design around (`F1`–`F10`), and the residual risk to put in front of risk
   and compliance.
-* **[docs/gotchas.md](docs/gotchas.md)** — twenty things that will cost you
-  time. The practical surprises, in one line each: soft delete, two-pass
-  redaction, the endpoint rules, and the conversation permission and CMEK model
-  that live in a different service entirely and follow their own key-location
-  rule.
+* **[docs/maintaining.md](docs/maintaining.md)** — only if you are working on
+  this repo. The traps in its scripts, test suites and Cloud Run builds, none of
+  which are platform behaviours.
