@@ -710,6 +710,10 @@ the keyless control stayed readable throughout.
 | `run_layer4_conversation.sh` | Layer 4, conversations — create reported and attributed, no compliance claimed, nothing deleted | 7/7 |
 | `run_layer5.sh` (steps 7–8) | The same probe and the per-location verdict, from inside the agent gate. Step 7 skips on an agents-only estate | Passing |
 
+The shipped `CONVERSATION_KMS_KEY=conversation-key` was verified live on
+2026-09-01: a CMEK conversation created in `us` under that name, key confirmed
+on read-back, in a project whose key slot had not been used before.
+
 Counts are for the shipped `CONVERSATION_LOCATIONS=us`; adding `eu` adds a
 create-and-read-back check per extra location. The probe reports a single
 drift verdict over a matrix it prints in full — the paired key accepted, three

@@ -59,10 +59,13 @@ they feed into, live elsewhere:
   rather than attesting one key per location.
 * **Offering a conversation key is a permanent write, even when the call
   fails.** The first key submitted is registered for the whole project +
-  location — **including the key name**, measured 2026-09-01: in a location
-  pinned to `.../cryptoKeys/agent-key`, an otherwise identical path ending
-  `.../cryptoKeys/conversation-key` is refused with `Invalid resource state for
-  "conversation.kms_key_name": Cannot add a new KMS key`. Renaming the key is
+  location — **including the key name**, measured both ways on 2026-09-01. In a
+  project pinned to `.../cryptoKeys/agent-key`, an otherwise identical path
+  ending `.../cryptoKeys/conversation-key` is refused with `Invalid resource
+  state for "conversation.kms_key_name": Cannot add a new KMS key`; in a second
+  project, pinned to `conversation-key` by its own first call, `agent-key` is
+  refused the same way. Same ring, same location, same project — only the key
+  name differs, and each estate refuses the other's. Renaming the key is
   therefore not possible after the first conversation, only reconfiguring the
   name you point at. Every later key is refused, disabling the key does not free
   the slot, and no API resets it. Anyone who can call `CreateConversation` can burn
