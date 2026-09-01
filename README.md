@@ -119,23 +119,25 @@ For what has been *tested* across the other combinations, see
 | **Layer 4 / Layer 5 infra** | `INFRA_REGION` | `us-east4` | A **Cloud Run region**, not a GDA location. `us` is a multi-region and `gcloud run` rejects it |
 | **Unapproved key** (tests only) | — | `rogue-kr` / `rogue-key` in `ROGUE_PROJECT_ID`, in `us` | A second project, so Layer 4's unapproved-key path is reachable |
 
-One agent and one conversation, both in the `us` multi-region — but **two key
-rings**, `us` for the agent and `us-central1` for the conversation, because the
-two resource types disagree about where the key goes. Same key ring and key
-*name* in both; only the KMS location differs.
+One agent and one conversation, both in the `us` multi-region, and **two key
+rings**: `us` for the agent, `us-central1` for the conversation. Each resource
+type takes its key in a different KMS location, so a single multi-region needs
+both. The key ring and key *name* are the same in each; only the KMS location
+differs.
 
-`INFRA_REGION` is the one that catches people out: it is where the enforcer
-function and scanner job are *deployed*, and has nothing to do with which
-locations they govern — the enforcer reaches every location over the API.
-Setting it to `us` fails the deploy, so `prelude.sh` rejects that up front.
+`INFRA_REGION` is where the enforcer function and the scanner job are
+*deployed*. It is independent of the locations they govern — the enforcer
+reaches every location over the API — and it takes a Cloud Run region, so
+`prelude.sh` checks it before a deploy is attempted.
 
 > **`eu` is supported but not deployed by default.** Set
 > `CONVERSATION_LOCATIONS=us,eu` and `AGENT_LOCATION=eu` to exercise it. The
 > `us` → `us-central1`, `eu` → `europe-west1` map in `common/gda_common.py` is
-> the platform rule and is not configurable; `CONVERSATION_LOCATIONS` only
-> selects which of its entries this estate deploys into, and rejects a location
-> that cannot host a conversation rather than burning the one-shot key slot on
-> it. Both are verified live by [`tests/run_matrix.sh`](tests/run_matrix.sh).
+> the platform rule and is not configurable; `CONVERSATION_LOCATIONS` selects
+> which of its entries this estate deploys into, and a location that cannot host
+> a conversation is rejected before the API is called, which leaves the one-shot
+> key slot unused. Both are verified live by
+> [`tests/run_matrix.sh`](tests/run_matrix.sh).
 
 | Everything else | Value |
 | :--- | :--- |
@@ -205,7 +207,7 @@ overrides only what you set in it:
 | :--- | :--- | :--- |
 | `PROJECT_ID` | everything | The workload project holding the agents, the key and Layers 4–5 |
 | `PROJECT_NUMBER` | preflight | Derives the two Google-managed service agents and the Cloud Build identity |
-| `APPROVED_KMS_PROJECTS` | Layers 1, 4, 5 | The CMEK allowlist. The policy, the enforcer and the scanner all read the same value, so they cannot disagree |
+| `APPROVED_KMS_PROJECTS` | Layers 1, 4, 5 | The CMEK allowlist. The policy, the enforcer and the scanner all read the same value, so all three reach the same verdict |
 | `ROGUE_PROJECT_ID` | validation only | A second disposable project. Leave the placeholder unless you are running the test suite |
 
 Everything else — `AGENT_LOCATION`, `CONVERSATION_LOCATIONS`, `INFRA_REGION`,
@@ -373,18 +375,16 @@ compliance. A non-compliant agent has its content redacted — twice, since one
 pass only rotates it into the read-only `lastPublishedContext` — and is then
 soft-deleted. End to end, 13–30 s.
 
-**Which product this is**, because the repo uses two and the names are easy to
-confuse. Layer 4's enforcer is a **Cloud Run function**
-(`gcloud functions deploy --gen2` — the product formerly called Cloud Functions
-2nd gen). Layer 5's scanner is a plain **Cloud Run job**
-(`gcloud run jobs deploy`), not a function. Nothing here uses 1st-gen functions.
+**Which product this is.** The repo uses two. Layer 4's enforcer is a
+**Cloud Run function** (`gcloud functions deploy --gen2` — the product formerly
+called Cloud Functions 2nd gen). Layer 5's scanner is a **Cloud Run job**
+(`gcloud run jobs deploy`). Neither is a 1st-gen function.
 
-A Cloud Run function *is* backed by a Cloud Run service, so it answers to both
-CLIs — and this repo uses both deliberately: `gcloud functions deploy` to create
-it, because only that wires the Eventarc trigger, and `gcloud run services
-update` to flip `DRY_RUN` without a redeploy. The one place the distinction
-bites is deletion — see
-[gotchas](docs/gotchas.md).
+A Cloud Run function is backed by a Cloud Run service, so it is addressable
+through both CLIs, and this repo uses both: `gcloud functions deploy` to create
+it, since that is what wires the Eventarc trigger, and `gcloud run services
+update` to change `DRY_RUN` without a redeploy. Deletion is the one operation
+where the two are not interchangeable — see [gotchas](docs/gotchas.md).
 
 It runs in one of two modes, set by the `DRY_RUN` environment variable on the
 Cloud Run service backing it:
@@ -871,8 +871,8 @@ Two API behaviours to know before submitting a conversation key:
 | `.github/workflows/` | Reference CI pipeline for Layers 1 and 2 |
 
 `common/gda_common.py` is deliberately the only place compliance is decided, so
-the real-time enforcer and the periodic report cannot disagree about the same
-resource. The deploy scripts copy it into each build context.
+the real-time enforcer and the periodic report reach the same verdict for a
+given resource. The deploy scripts copy it into each build context.
 
 ## Adapting this to your own estate
 
