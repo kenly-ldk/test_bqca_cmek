@@ -97,7 +97,7 @@ def create(location: str, conversation_id: str) -> str | None:
         return None
 
     kms_key = (f"projects/{project}/locations/{kms_location}"
-               f"/keyRings/{env['KMS_KEYRING']}/cryptoKeys/{env['KMS_KEY']}")
+               f"/keyRings/{env['KMS_KEYRING']}/cryptoKeys/{env['CONVERSATION_KMS_KEY']}")
 
     # The gate. Runs before the API is touched, because the API remembers.
     verdict = check_conversation_key(location, kms_key, approved)

@@ -119,11 +119,24 @@ For what has been *tested* across the other combinations, see
 | **Layer 4 / Layer 5 infra** | `INFRA_REGION` | `us-east4` | A **Cloud Run region**, not a GDA location. `us` is a multi-region and `gcloud run` rejects it |
 | **Unapproved key** (tests only) | — | `rogue-kr` / `rogue-key` in `ROGUE_PROJECT_ID`, in `us` | A second project, so Layer 4's unapproved-key path is reachable |
 
-One agent and one conversation, both in the `us` multi-region, and **two key
-rings**: `us` for the agent, `us-central1` for the conversation. Each resource
-type takes its key in a different KMS location, so a single multi-region needs
-both. The key ring and key *name* are the same in each; only the KMS location
-differs.
+One agent and one conversation, both in the `us` multi-region, and **two keys**:
+
+```
+agent         projects/P/locations/us/keyRings/gda-kr/cryptoKeys/agent-key
+conversation  projects/P/locations/us-central1/keyRings/gda-kr/cryptoKeys/conversation-key
+```
+
+Each resource type takes its key in a different KMS location, so a single
+multi-region needs both. One key ring name, two key names — the names differ so
+that a key path says which resource it serves without reading the location
+segment.
+
+**`CONVERSATION_KMS_KEY` is fixed once a location has created its first CMEK
+conversation.** The first key path offered to `CreateConversation` is registered
+permanently for the whole project and location, *including the key name*, and a
+later key is refused with `Cannot add a new KMS key`. Choose it before the first
+call; on an estate that already created conversations under a different name,
+set that name in `shared.env.local` rather than renaming the key.
 
 `INFRA_REGION` is where the enforcer function and the scanner job are
 *deployed*. It is independent of the locations they govern — the enforcer

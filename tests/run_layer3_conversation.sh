@@ -48,7 +48,7 @@ approved = parse_approved_projects(env.get("APPROVED_KMS_PROJECTS") or project)
 
 def key(kms_location):
     return (f"projects/{project}/locations/{kms_location}"
-            f"/keyRings/{env['KMS_KEYRING']}/cryptoKeys/{env['KMS_KEY']}")
+            f"/keyRings/{env['KMS_KEYRING']}/cryptoKeys/{env['CONVERSATION_KMS_KEY']}")
 
 
 failures = []

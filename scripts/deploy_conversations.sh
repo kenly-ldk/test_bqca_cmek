@@ -28,7 +28,7 @@ MISSING=0
 for PAIR in $(conversation_kms_pairs); do
   CONV_LOCATION="${PAIR%%:*}"
   CONV_KMS_LOCATION="${PAIR##*:}"
-  if gcloud kms keys describe "${KMS_KEY}" --keyring="${KMS_KEYRING}" \
+  if gcloud kms keys describe "${CONVERSATION_KMS_KEY}" --keyring="${KMS_KEYRING}" \
        --location="${CONV_KMS_LOCATION}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
     echo "  ${CONV_KMS_LOCATION} key present (serves conversations in ${CONV_LOCATION})"
   else

@@ -101,7 +101,7 @@ env = load()
 project = env["PROJECT_ID"]
 parent = f"projects/{project}/locations/{location}"
 key = (f"projects/{project}/locations/{CONVERSATION_KMS_LOCATION[location]}"
-       f"/keyRings/{env['KMS_KEYRING']}/cryptoKeys/{env['KMS_KEY']}")
+       f"/keyRings/{env['KMS_KEYRING']}/cryptoKeys/{env['CONVERSATION_KMS_KEY']}")
 
 agents = geminidataanalytics.DataAgentServiceClient(
     client_options=ClientOptions(api_endpoint=api_endpoint(location)))

@@ -59,8 +59,13 @@ they feed into, live elsewhere:
   rather than attesting one key per location.
 * **Offering a conversation key is a permanent write, even when the call
   fails.** The first key submitted is registered for the whole project +
-  location; every later key is refused, disabling the key does not free the
-  slot, and no API resets it. Anyone who can call `CreateConversation` can burn
+  location — **including the key name**, measured 2026-09-01: in a location
+  pinned to `.../cryptoKeys/agent-key`, an otherwise identical path ending
+  `.../cryptoKeys/conversation-key` is refused with `Invalid resource state for
+  "conversation.kms_key_name": Cannot add a new KMS key`. Renaming the key is
+  therefore not possible after the first conversation, only reconfiguring the
+  name you point at. Every later key is refused, disabling the key does not free
+  the slot, and no API resets it. Anyone who can call `CreateConversation` can burn
   it — so do not "just try" a key to see what happens, and note that the
   superseded `conversation_key_probe.py` did exactly that on every run.
 * **`us-east4` cannot create a conversation at all** — 0 of 13 attempts, with or

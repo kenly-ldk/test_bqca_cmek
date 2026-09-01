@@ -43,7 +43,7 @@ log "Cloud KMS keys for the conversation surface"
 for PAIR in $(conversation_kms_pairs); do
   CONV_LOCATION="${PAIR%%:*}"
   CONV_KMS_LOCATION="${PAIR##*:}"
-  grant_cmek_key "${CONV_KMS_LOCATION}"
+  grant_cmek_key "${CONV_KMS_LOCATION}" "${CONVERSATION_KMS_KEY}"
   echo "  ${CONV_KMS_LOCATION} (for conversations in ${CONV_LOCATION}), both service agents granted"
 done
 

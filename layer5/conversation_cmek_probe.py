@@ -132,7 +132,7 @@ def _try_create(client, parent: str, conversation_id: str, agent: str,
 
 def _key(project: str, kms_location: str, env: dict) -> str:
     return (f"projects/{project}/locations/{kms_location}"
-            f"/keyRings/{env['KMS_KEYRING']}/cryptoKeys/{env['KMS_KEY']}")
+            f"/keyRings/{env['KMS_KEYRING']}/cryptoKeys/{env['CONVERSATION_KMS_KEY']}")
 
 
 def probe_location(project: str, location: str, run_id: str, env: dict,
@@ -308,7 +308,7 @@ def probe_revocation(project: str, location: str, run_id: str, env: dict,
     def key_version(action: str) -> None:
         subprocess.run(
             ["gcloud", "kms", "keys", "versions", action, "1",
-             "--key", env["KMS_KEY"], "--keyring", env["KMS_KEYRING"],
+             "--key", env["CONVERSATION_KMS_KEY"], "--keyring", env["KMS_KEYRING"],
              "--location", paired, "--project", project, "--quiet"],
             check=False, capture_output=True, text=True)
 

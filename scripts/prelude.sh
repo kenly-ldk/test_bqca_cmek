@@ -34,6 +34,7 @@ export APPROVED_KMS_PROJECTS="${APPROVED_KMS_PROJECTS:-${PROJECT_ID}}"
 # Fully-qualified key paths, derived so no script hardcodes them. Distinct names
 # from KMS_KEY/ROGUE_KMS_KEY so re-sourcing this file stays idempotent.
 export APPROVED_KMS_KEY_PATH="projects/${PROJECT_ID}/locations/${AGENT_LOCATION}/keyRings/${KMS_KEYRING}/cryptoKeys/${KMS_KEY}"
+export CONVERSATION_KMS_KEY="${CONVERSATION_KMS_KEY:-${KMS_KEY}}"
 export ROGUE_KMS_KEY_PATH="projects/${ROGUE_PROJECT_ID}/locations/${AGENT_LOCATION}/keyRings/${ROGUE_KMS_KEYRING}/cryptoKeys/${ROGUE_KMS_KEY}"
 
 # A GDA multi-region is not a deployable region. Catching it here beats a
@@ -56,15 +57,15 @@ export AIC_SERVICE_AGENT="serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-clouda
 
 # Create a key ring + key in one KMS location and let both service agents use it.
 # Idempotent: create is best-effort, the IAM binding is authoritative.
-grant_cmek_key() {  # $1=kms location
-  local kms_location="$1" member
+grant_cmek_key() {  # $1=kms location  $2=key name (default: the agent key)
+  local kms_location="$1" key="${2:-${KMS_KEY}}" member
   gcloud kms keyrings create "${KMS_KEYRING}" --location="${kms_location}" \
     --project="${PROJECT_ID}" 2>/dev/null || true
-  gcloud kms keys create "${KMS_KEY}" --keyring="${KMS_KEYRING}" \
+  gcloud kms keys create "${key}" --keyring="${KMS_KEYRING}" \
     --location="${kms_location}" --purpose=encryption \
     --project="${PROJECT_ID}" 2>/dev/null || true
   for member in "${GDA_SERVICE_AGENT}" "${AIC_SERVICE_AGENT}"; do
-    gcloud kms keys add-iam-policy-binding "${KMS_KEY}" \
+    gcloud kms keys add-iam-policy-binding "${key}" \
       --keyring="${KMS_KEYRING}" --location="${kms_location}" \
       --project="${PROJECT_ID}" --member="${member}" \
       --role=roles/cloudkms.cryptoKeyEncrypterDecrypter --quiet >/dev/null

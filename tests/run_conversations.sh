@@ -61,7 +61,7 @@ EOF
 log "Preconditions"
 for PAIR in $(conversation_kms_pairs); do
   CONV_KMS_LOCATION="${PAIR##*:}"
-  if ! gcloud kms keys describe "${KMS_KEY}" --keyring="${KMS_KEYRING}" \
+  if ! gcloud kms keys describe "${CONVERSATION_KMS_KEY}" --keyring="${KMS_KEYRING}" \
        --location="${CONV_KMS_LOCATION}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
     echo "  No paired-region key in ${CONV_KMS_LOCATION}." >&2
     echo "  Run:  bash scripts/setup_conversations.sh" >&2
