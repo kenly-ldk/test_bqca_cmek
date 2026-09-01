@@ -24,7 +24,7 @@ that governance, in five layers.
 | 2 — IAM least privilege | Limits who can create an agent at all, so there are fewer ways to bypass the pipeline |
 | 3 — CMEK at rest | Encrypts agent content under your key, so revoking the key makes it unreadable |
 | 4 — Real-time remediation | Catches an agent created outside the pipeline, redacts its content and soft-deletes it; for conversations, reports the create and attributes the caller |
-| 5 — Continuous compliance | Reports the CMEK posture of every agent, hourly, for audit. Anything it could not check is marked unverified rather than passed. For conversations that means all of them, because only their creator can read one |
+| 5 — Continuous compliance | An hourly, audit-ready report of every agent's CMEK posture; anything it could not check is marked unverified, never passed. For conversations it can flag a violation but cannot certify a location clean |
 
 Layers 1 and 2 are preventive, 4 and 5 are detective, and 3 is the cryptographic
 boundary the other four exist to keep enforced. Each part below opens with a
@@ -636,8 +636,10 @@ CONVERSATION_CREATED_CMEK_UNVERIFIABLE  caller=analyst@example.com
 
 The control that actually binds on this surface is therefore **preventive**:
 Layer 1 gates the key, Layer 2 restricts who may call `CreateConversation` at
-all, and your application sets `kms_key` on every call. Layer 5 marks these
-conversations unverified rather than passing them.
+all, and your application sets `kms_key` on every call. Layer 5 still runs on
+this surface, but its verdict is one-way: if it sees an unkeyed conversation
+that is a proven violation, and otherwise it records the location as unverified
+rather than clean.
 
 **Your application creates the real conversations,** not a deploy step. Layer 1
 rejects any manifest that declares one, and the key must be supplied per call:
