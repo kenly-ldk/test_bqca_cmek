@@ -1,16 +1,12 @@
 # GDA CMEK Enforcement Framework
 
-> **This is an MVP, not an officially supported Google product.** It is a
-> reference implementation, built and validated by hand against two disposable
-> projects. There is no SLA, no support commitment and no warranty. Review it,
-> adapt it, and validate it in your own environment before relying on it for
-> anything that matters.
+> **This is an MVP reference implementation, not an officially supported Google product.** 
 
 A working, tested MVP that brings Gemini Data Analytics (Conversational
 Analytics) under organization-wide **CMEK governance**.
 
 GDA supports CMEK today, and the key holds as a real cryptographic boundary:
-revoke it and the agent content becomes unreadable. The piece still to come from
+revoke it and the resource content becomes unreadable. The piece still to come from
 the platform is *org-policy* enforcement — `geminidataanalytics.googleapis.com`
 is not yet accepted by `constraints/gcp.restrictNonCmekServices`, so a key is
 supplied per resource rather than mandated centrally. This framework supplies
@@ -29,43 +25,22 @@ that governance, in five layers.
 Layers 1 and 2 are preventive, 4 and 5 are detective, and 3 is the cryptographic
 boundary the other four exist to keep enforced. Each part below opens with a
 diagram of its own path — [agents](#how-it-works),
-[conversations](#how-it-works-1) — because the two differ at almost every layer.
+[conversations](#how-it-works-1) — because there are some subtle difference
+between them.
 
-**They are independent controls, not a pipeline — adopt any subset.** Nothing
-here requires all five. What each one gives you on its own, and what it leaves
-uncovered:
+**These are independent controls, not a pipeline — adopt any subset.** 
 
-| Adopt | You get | Still uncovered |
-| :--- | :--- | :--- |
-| 1 alone | No non-compliant manifest reaches the API from your pipeline | Anything created outside the pipeline |
-| 2 alone | Fewer principals able to create a resource at all | What those principals then create |
-| 1 + 2 | Prevention on both the pipeline and the ad-hoc path | Nothing detects a gap in either |
-| 3 alone | Content unreadable once the key is revoked | Nothing ensures a key is set |
-| 4 alone | A non-compliant agent is caught and removed in seconds | Creates the event stream never delivers |
-| 5 alone | An hourly audit position over the whole estate | Up to an hour of exposure |
-| 4 + 5 | Seconds-to-minutes detection with an hourly backstop | Prevention |
-
-The only build-time coupling is `common/gda_common.py`, which Layers 4 and 5
-each embed so their verdicts agree, and `layer3/deploy.sh` calling the Layer 1
-gate, which is what makes it a policy-gated deploy. Layer 5 reads Cloud Asset
-Inventory and the live API — never the enforcer's output — so it stands alone
-and is what catches the creates Layer 4's event stream misses.
-
-**This is not equivalent to native CMEK org-policy enforcement.** Native
-enforcement stops a non-compliant resource from ever existing. This framework
-detects one seconds after it exists, scrubs its content, and soft-deletes it —
-leaving a redacted tombstone for 30 days, because the API has no purge.
-Disclose the exposure window and the residual retention to risk and
-compliance. See
-[§8 Control Equivalence Matrix](docs/design.md#8-control-equivalence-matrix).
+**This is not equivalent to native CMEK org-policy enforcement.** While native
+enforcement at org-policy would stop a non-compliant resource from ever existing.
+This framework detects after it exists, scrubs its content, and deletes it. See
+[§8 Control Equivalence Matrix](docs/design.md#8-control-equivalence-matrix) for 
+the exposure window and the residual retention to risk and compliance.
 
 **Scope: two resource types, both covered.** `DataAgent` and `Conversation`
 each carry customer content and each take a CMEK key, and all five layers cover
-both. Stateless chat is the third thing the API offers and creates no resource
-at all, so there is nothing for CMEK to hold — Layer 2 governs who may call it
-and that is the whole of it.
-
-The mechanics differ between the two — different key locations, a different
+both. Stateless chat is alternative option the API offers but creates no resource
+at all, so there is nothing for CMEK to hold — Layer 2 just governs who may call it.
+* The mechanics differ between the two — different key locations, a different
 audit service, a different remediation story — so `Conversation` get its own
 [deploy step](#part-2--conversations) and
 [validation suite](#reproduce-the-conversation-tests) rather than
@@ -79,7 +54,7 @@ then **[Part 2 — Conversations](#part-2--conversations)**. Each covers its own
 deploy, how it works, how to reproduce the tests, and the results. Everything in
 this section serves both.
 
-Which KMS location each resource type needs is tabulated in
+> Which KMS location each resource type needs is tabulated in
 [Where the CMEK key goes](#where-the-cmek-key-goes).
 
 Deploying needs `gcloud`, `bq` and Python. OPA and Regal are needed only to run
@@ -126,11 +101,8 @@ chmod +x ~/.local/bin/opa ~/.local/bin/regal
 
 ### What the demo deploys
 
-This is the **one combination the deploy scripts actually stand up**, not the
-set of combinations that work. Every value is a default in
+This is the **one combination of key and agent resource location taht the deploy scripts actually stand up**, not the exhausted set of combinations that work. Every value is a default in
 [`config/shared.env`](config/shared.env), overridable in `shared.env.local`.
-For what has been *tested* across the other combinations, see
-[Where the CMEK key goes](#where-the-cmek-key-goes).
 
 | | Variable | Value | Why |
 | :--- | :--- | :--- | :--- |
@@ -146,11 +118,6 @@ agent         projects/P/locations/us/keyRings/gda-kr/cryptoKeys/agent-key
 conversation  projects/P/locations/us-central1/keyRings/gda-kr/cryptoKeys/conversation-key
 ```
 
-Each resource type takes its key in a different KMS location, so a single
-multi-region needs both. One key ring name, two key names — the names differ so
-that a key path says which resource it serves without reading the location
-segment.
-
 **`CONVERSATION_KMS_KEY` is fixed once a location has created its first CMEK
 conversation.** The first key path offered to `CreateConversation` is registered
 permanently for the whole project and location, *including the key name*, and a
@@ -163,23 +130,17 @@ set that name in `shared.env.local` rather than renaming the key.
 reaches every location over the API — and it takes a Cloud Run region, so
 `prelude.sh` checks it before a deploy is attempted.
 
-> **`eu` is supported but not deployed by default.** Set
-> `CONVERSATION_LOCATIONS=us,eu` and `AGENT_LOCATION=eu` to exercise it. The
-> `us` → `us-central1`, `eu` → `europe-west1` map in `common/gda_common.py` is
-> the platform rule and is not configurable; `CONVERSATION_LOCATIONS` selects
-> which of its entries this estate deploys into, and a location that cannot host
-> a conversation is rejected before the API is called, which leaves the one-shot
-> key slot unused. Both are verified live by
-> [`tests/run_matrix.sh`](tests/run_matrix.sh).
-
 | Everything else | Value |
 | :--- | :--- |
-| Sample datasource | `cymbal_demo.customers`, BigQuery, `us-east4` |
+| Sample datasource | `cymbal_demo.customers`, BigQuery, `us` — created in `AGENT_LOCATION`, so it moves with the agent |
 | Layer 2 personas | `layer2-` + `cicd-deployer`, `app-runtime`, `analyst`, `conv-user`, `no-access` |
 | Layer 4 enforcer | `gda-cmek-enforcer` (Cloud Run function, `us-east4`), sink `gda-cmek-create-sink`, topic `gda-cmek-violations` |
 | Layer 5 scanner | `gda-inventory-scanner` (Cloud Run job, `us-east4`), hourly (`0 * * * *`) |
 | Layer 5 output | `gda_compliance.agent_inventory` + view `v_agent_compliance`, BigQuery `us-east4` |
 | Locations the scanner sweeps | `us-east4`, `us`, `eu`, `global` — `global` included so agents that *cannot* be CMEK-encrypted still surface as non-compliant |
+
+> **For what has been *tested* across the other combinations, see
+[Where the CMEK key goes](#where-the-cmek-key-goes).**
 
 ## Part 1 — GDA agents
 
@@ -218,19 +179,6 @@ bash scripts/deploy_agents.sh
 #    classified COMPLIANT, then arm the enforcer.
 bash scripts/deploy_agents.sh --enforce
 ```
-
-**Why the scripts split the way they do.** Setup, deploy and test each come in
-an agent flavour and a conversation flavour, because the two resource types need
-their keys in *different KMS locations* and only one of them needs Data Access
-logs. The control plane does **not** split: Layers 2, 4 and 5 are one persona
-set, one enforcer and one scanner, each handling both types inside a single
-deployment.
-
-| | Part 1 — agents | Part 2 — conversations | Shared |
-| :--- | :--- | :--- | :--- |
-| Setup | `scripts/setup_agents.sh` | `scripts/setup_conversations.sh` | `scripts/00_bootstrap.sh` |
-| Deploy | `scripts/deploy_agents.sh` | `scripts/deploy_conversations.sh` | `scripts/deploy_controls.sh` |
-| Test | `tests/run_agents.sh` | `tests/run_conversations.sh` | — |
 
 **What you have to change.** `config/shared.env` ships working defaults for
 everything except your own identity, and `config/shared.env.local` (gitignored)
@@ -356,6 +304,10 @@ CMEK policy, and only then calls the API — so it exercises Layers 1 and 3
 together. In code, the part that matters:
 
 ```python
+client = geminidataanalytics.DataAgentServiceClient(  # the `us` endpoint,
+    client_options=ClientOptions(                     # not the global one
+        api_endpoint="geminidataanalytics.us.rep.googleapis.com"))
+
 agent = geminidataanalytics.DataAgent(
     display_name="Wealth Management Analytics Agent",
     data_analytics_agent=geminidataanalytics.DataAnalyticsAgent(
@@ -363,19 +315,22 @@ agent = geminidataanalytics.DataAgent(
     ),
 )
 agent.kms_key = (
-    f"projects/{kms_project}/locations/us-east4"
-    f"/keyRings/gda-kr/cryptoKeys/agent-key"
+    f"projects/{kms_project}/locations/us"       # the agent's OWN location.
+    f"/keyRings/gda-kr/cryptoKeys/agent-key"     # `us-central1` is rejected here.
 )
 
-client.create_data_agent_sync(       # target this location's own endpoint,
-                                     # never the global one
+client.create_data_agent_sync(
     request=geminidataanalytics.CreateDataAgentRequest(
-        parent=f"projects/{project}/locations/us-east4",
+        parent=f"projects/{project}/locations/us",
         data_agent_id="wealth-management-agent",
         data_agent=agent,
     )
 )
 ```
+
+Set beside [the conversation call](#how-it-works-1), which is the same project
+and the same multi-region, the two key paths are the whole of the difference:
+`locations/us` here, `locations/us-central1` there.
 
 **The key can only be set at creation** — it cannot be added or changed
 afterwards, which is exactly what makes Layer 4's read-back check trustworthy.
