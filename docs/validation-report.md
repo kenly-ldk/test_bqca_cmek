@@ -35,9 +35,11 @@ every quadrant of the scanner's reconciliation matrix. It is not a layer — it 
 the unit suite for the logic the layers share.
 
 > **These verdicts are about DataAgents.** The other resource type carrying
-> customer content — **Conversations** — is invisible to the Layer 4 sink and to
-> Cloud Asset Inventory, and is governed by different rules throughout. CMEK
-> **does** hold on conversation content, but only with a key in the
+> customer content — **Conversations** — cannot be enumerated by Cloud Asset
+> Inventory or verified by the Layer 4 sink, which reaches it only once
+> `cloudaicompanion` Data Access logs are enabled and even then can attribute a
+> create but never read it back. It is governed by different rules throughout.
+> CMEK **does** hold on conversation content, but only with a key in the
 > multi-region's paired region (`us` → `us-central1`, `eu` → `europe-west1`),
 > which is not the location Google documents; and it is **opt-in per
 > conversation**, so a registered key protects nothing until each caller asks
@@ -589,9 +591,10 @@ exposure. Three things follow from *how* it works:
    `europe-west1`. An estate that provisions keys by copying the agent-side
    convention will register the wrong key, and — because the first key offered
    is permanent — will not get a second attempt.
-3. **The residual exposure is real but bounded.** Layer 4 still cannot see
-   conversations, the lifecycle is invisible unless Data Access logs are enabled
-   on `cloudaicompanion.googleapis.com`, and `us-east4` cannot host them at all.
+3. **The residual exposure is real but bounded.** Layer 4 can attribute a
+   conversation's creation but never verify or remediate it, the lifecycle is
+   invisible altogether unless Data Access logs are enabled on
+   `cloudaicompanion.googleapis.com`, and `us-east4` cannot host them at all.
    Containment is still partly non-cryptographic: dedicate projects to agents and
    conversations, and rely on hard delete for the content's short life.
 

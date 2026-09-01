@@ -547,7 +547,7 @@ Each layer covers conversations, through different mechanics:
 | 3 — CMEK at rest | key + agent | same key ring name, **paired region**; the conversation is created by your app, not the pipeline |
 | 4 — detect | `CreateDataAgent`, Admin Activity | `TopicService.CreateTopic`, Data Access (**off by default**) |
 | 4 — verdict | re-reads the agent, rules on it | **cannot re-read** — reports the create and the caller only |
-| 4 — remediate | redact ×2, soft delete | **none possible** — the resource is invisible to the enforcer |
+| 4 — remediate | redact ×2, soft delete | **none possible** — the enforcer can neither read the resource back nor delete it |
 | 5 — report | per agent, two reconciled sources | per location, never a clean bill: the scanner can only list conversations it created itself |
 
 Set against [the agent diagram](#how-it-works), the same five layers change
@@ -652,7 +652,7 @@ It calls the Layer 5 probe and the two dedicated gates, **in that order**:
 asserts that a paired-region key is *accepted*, so it has to measure an
 undisturbed estate. KMS takes minutes to propagate a key state change in either
 direction — the revocation proof below measures a keyed conversation going dark
-about four minutes after the disable — so a probe run after the Layer 3 gate
+at t+5min in `us` and t+2min in `eu` — so a probe run after the Layer 3 gate
 sees the suite's own re-enabled key still rejecting and reports it as F8 drift.
 
 Layer 1's 12 `conversation_keys` policy tests and Layer 2's conversation cells
@@ -824,9 +824,9 @@ rather than trusted:
 | **`us` agent + `us` conversation** | `us` **and** `us-central1` | Pass — one multi-region, two key locations |
 | **`eu` agent + `eu` conversation** | `europe` **and** `europe-west1` | Pass — one multi-region, two key locations |
 | `DataAgent` with a key in an unapproved project | `us`, second project | Pass as a negative — created, then detected and remediated by Layer 4 (`run_agents.sh`) |
-| `Conversation` in `us` / `eu` | paired region | Pass — content went dark ~4 min after the key was disabled, a keyless control stayed readable (`run_conversations.sh`) |
+| `Conversation` in `us` / `eu` | paired region | Pass — content went dark at t+5min in `us` and t+2min in `eu` after the key was disabled, a keyless control stayed readable (`run_conversations.sh`) |
 | `Conversation` in `us` / `eu` | every other KMS location | Correctly rejected — 13 locations probed for `us`, 11 for `eu` (`conversation_cmek_probe.py`) |
-| `Conversation` in `us-east4` | any, or none | Cannot be created at all — 0 of 13 attempts |
+| `Conversation` in `us-east4` | any, or none | Cannot be created at all — 0 of 13 keyless attempts, and keyed attempts fail the same way |
 
 Measured 2026-08-31. The last four rows come from the suites and probes named
 in them rather than from the matrix script, which deliberately does not repeat
