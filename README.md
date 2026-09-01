@@ -641,6 +641,32 @@ this surface, but its verdict is one-way: if it sees an unkeyed conversation
 that is a proven violation, and otherwise it records the location as unverified
 rather than clean.
 
+**The ceiling is about identity, not permissions, and your architecture can
+lift it.** The measured rule is that a conversation is visible to the principal
+that created it: `roles/cloudaicompanion.topicAdmin` — which carries
+`topics.delete` and `topics.setIamPolicy`, and is the most privileged role on
+the resource — still gets `{}` and a 404 for someone else's. The `404` rather
+than a `403`, and the list method being named `FindReadableTopics`, both say the
+filter runs on creator identity before IAM is consulted. `setIamPolicy` is no
+way round it either: naming a conversation in a policy requires reading it
+first, and that read is the thing returning 404.
+
+So make your **application's service account the creator of every
+conversation**, rather than passing the end user's credentials through. That one
+identity is then the creator of all of them and can enumerate and read them,
+which restores a verifiable inventory. Two things to weigh:
+
+* **Attribution moves.** Layer 4 will report the app's service account as the
+  caller on every create, not the analyst. If you need per-user attribution you
+  now have to log it in the application, because the audit entry no longer
+  carries it.
+* **Layer 5 has to run as that identity** to benefit — as shipped, the scanner
+  runs as its own service account (`gda-inventory-scanner`) and would need to be
+  that principal or impersonate it.
+
+This follows from the measured visibility rule rather than from a test of the
+pattern itself; it is a design option, not something this repo has stood up.
+
 **Your application creates the real conversations,** not a deploy step. Layer 1
 rejects any manifest that declares one, and the key must be supplied per call:
 
